@@ -111,3 +111,7 @@ dmypy.json
 .pyre/
 .pytype/
 cython_debug/
+
+# extension: local venv and generated outputs
+.venv/
+experiments/incontext_obfuscation/outputs/
