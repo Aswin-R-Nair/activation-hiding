@@ -17,8 +17,8 @@
 > with model size and architecture. See that directory's README for the
 > experimental design and findings.
 >
-> The rest of this README is the original project's documentation, preserved
-> below.
+> The rest of this README is adapted from the original project's documentation;
+> the extension's additions are noted inline.
 
 ---
 
@@ -35,10 +35,16 @@ This repo contains the full experimental pipeline for the paper. If you just wan
 ## Installation
 
 ```bash
-git clone https://github.com/mgm52/neural-chameleons.git
+git clone https://github.com/Aswin-R-Nair/neural-chameleons.git
 cd neural-chameleons
 pip install -e .
 ```
+
+> **Extension note.** The in-context obfuscation experiment under
+> [`experiments/incontext_obfuscation/`](experiments/incontext_obfuscation/) is
+> self-contained and does **not** require `pip install -e .` — it has its own
+> lightweight setup (see that directory's README). The instructions below are
+> for the original full training/evaluation pipeline.
 
 Copy `.env.example` to `.env` and fill in your API keys:
 ```bash
@@ -100,6 +106,7 @@ neural-chameleons/
 │   └── logging/                       # Training loggers
 │
 ├── experiments/
+│   ├── incontext_obfuscation/         # ★ EXTENSION: in-context obfuscation (this work)
 │   ├── shared_utils/                  # Shared utility functions (model loading, testing)
 │   ├── self_obfuscation_v1_rated/     # Main training pipeline
 │   │   ├── concept_model_train_rated.py   # Train the model organism
@@ -153,6 +160,9 @@ neural-chameleons/
 
 ## Citation
 
+If you use this work, please cite the original paper, which this extension builds
+on:
+
 ```bibtex
 @article{mcguinness2025neural,
   title={Neural Chameleons: Language Models Can Learn to Hide Their Thoughts from Activation Monitors},
@@ -162,10 +172,22 @@ neural-chameleons/
 }
 ```
 
+The in-context obfuscation extension in this repository is not yet separately
+published; until then, please additionally credit this repository
+(`github.com/Aswin-R-Nair/neural-chameleons`, extension by Aswin R Nair).
+
 ## Acknowledgements
 
-This repo is a fork of Bailey et al.'s [Obfuscated Activations Bypass LLM Latent-Space Defenses](https://arxiv.org/abs/2412.09565). This work was completed as part of Scott Emmons' 2025 [MATS](https://www.matsprogram.org/) streams.
+**Extension.** The in-context obfuscation extension is by Aswin R Nair. It builds
+directly on the original Neural Chameleons project by Max McGuinness, Alex
+Serrano, Luke Bailey, and Scott Emmons, and uses the trained probes and model
+organism released with their [minimal reproduction](https://github.com/serteal/minimal_neural_chameleons).
+All original code is used under its MIT license.
+
+**Original project.** This repo is a fork of Bailey et al.'s [Obfuscated Activations Bypass LLM Latent-Space Defenses](https://arxiv.org/abs/2412.09565). This work was completed as part of Scott Emmons' 2025 [MATS](https://www.matsprogram.org/) streams.
 
 ## License
 
-MIT
+MIT — see [`LICENSE`](LICENSE). Copyright for the original code remains with Max
+McGuinness, Alex Serrano, Luke Bailey, and Scott Emmons; the license file is
+retained unmodified.
