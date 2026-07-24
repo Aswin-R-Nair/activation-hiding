@@ -1,3 +1,27 @@
+# Neural Chameleons — In-Context Obfuscation Extension
+
+> **This is an extension by [Aswin R Nair](https://github.com/Aswin-R-Nair), built on
+> the original "Neural Chameleons" work by Max McGuinness, Alex Serrano, Luke
+> Bailey, and Scott Emmons.** It is not affiliated with or endorsed by the
+> original authors.
+>
+> - Original repository: https://github.com/mgm52/neural-chameleons
+> - Original paper: [arXiv:2512.11949](https://arxiv.org/abs/2512.11949)
+> - Minimal reproduction (trained probes): https://github.com/serteal/minimal_neural_chameleons
+>
+> The original code is used under its MIT license (see [`LICENSE`](LICENSE),
+> which is retained unmodified). Everything under
+> [`experiments/incontext_obfuscation/`](experiments/incontext_obfuscation/) is
+> new work for this extension, which asks whether an **untrained** model can
+> obfuscate its activations when merely *asked* in-context — and how that scales
+> with model size and architecture. See that directory's README for the
+> experimental design and findings.
+>
+> The rest of this README is the original project's documentation, preserved
+> below.
+
+---
+
 # Neural Chameleons
 
 **Language Models Can Learn to Hide Their Thoughts from Activation Monitors**
