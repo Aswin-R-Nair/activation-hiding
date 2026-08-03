@@ -79,7 +79,7 @@ def make_real_layer12(model) -> Callable[[torch.Tensor], torch.Tensor]:
     """
     layers = model.model.layers
 
-    def f(inputs_embeds: torch.Tensor) -> torch.Tensor:
+    def f(inputs_embeds: torch.Tensor, attention_mask: torch.Tensor = None) -> torch.Tensor:
         captured = {}
 
         def hook(_m, _i, out):
@@ -87,16 +87,17 @@ def make_real_layer12(model) -> Callable[[torch.Tensor], torch.Tensor]:
             raise _StopForward()
 
         handle = layers[TARGET_LAYER].register_forward_hook(hook)
-        attn = torch.ones(
-            inputs_embeds.shape[:2], device=inputs_embeds.device, dtype=torch.long
-        )
+        if attention_mask is None:
+            attention_mask = torch.ones(
+                inputs_embeds.shape[:2], device=inputs_embeds.device, dtype=torch.long
+            )
         try:
-            model(inputs_embeds=inputs_embeds, attention_mask=attn, use_cache=False)
+            model(inputs_embeds=inputs_embeds, attention_mask=attention_mask, use_cache=False)
         except _StopForward:
             pass
         finally:
             handle.remove()
-        return captured["h"]  # [1, seq, H]
+        return captured["h"]  # [b, seq, H]
 
     return f
 
