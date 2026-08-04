@@ -142,18 +142,32 @@ class HFBackend:
         device_map: str = "auto",
         batch_size: int = 4,
         target_layer: int = TARGET_LAYER,
+        reserve_gib: float = 0.0,
+        grad_checkpoint: bool = False,
     ):
         from transformers import AutoModelForCausalLM, AutoTokenizer
 
         self.target_layer = target_layer
 
+        kwargs = dict(device_map=device_map, dtype=dtype, attn_implementation="eager")
+        # On a model that nearly fills the GPUs (e.g. 70B on 2x80GB), device_map=
+        # "auto" packs GPU 0 to the brim, leaving no room for forward/backward
+        # activations. reserve_gib caps per-GPU weight allocation so headroom is
+        # left for compute (the gradient scripts especially need this).
+        if reserve_gib > 0 and torch.cuda.device_count() > 1:
+            max_mem = {}
+            for i in range(torch.cuda.device_count()):
+                total = torch.cuda.get_device_properties(i).total_memory / (1024 ** 3)
+                max_mem[i] = f"{max(1, int(total - reserve_gib))}GiB"
+            kwargs["max_memory"] = max_mem
+            log.info("reserving %.0f GiB/GPU for activations -> max_memory=%s",
+                     reserve_gib, max_mem)
+
         log.info("Loading model %s ...", model_id)
-        self.model = AutoModelForCausalLM.from_pretrained(
-            model_id,
-            device_map=device_map,
-            dtype=dtype,
-            attn_implementation="eager",
-        )
+        self.model = AutoModelForCausalLM.from_pretrained(model_id, **kwargs)
+        if grad_checkpoint:
+            self.model.gradient_checkpointing_enable()
+            log.info("gradient checkpointing ON (trades compute for memory)")
         self.model.eval()
         for p in self.model.parameters():
             p.requires_grad = False

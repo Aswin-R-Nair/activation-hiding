@@ -138,6 +138,10 @@ def main() -> None:
     ap.add_argument("--k", type=int, default=16)
     ap.add_argument("--layer", type=int, default=TARGET_LAYER,
                     help="Residual layer the probe reads (default 12).")
+    ap.add_argument("--reserve-gib", type=float, default=0.0,
+                    help="For big multi-GPU models (e.g. 70B on 2x80GB): reserve "
+                    "this many GiB/GPU for activations so the backward pass fits. "
+                    "Also auto-enables gradient checkpointing. Try 8. 0=off (9B).")
     ap.add_argument("--steps", type=int, default=400)
     ap.add_argument("--lr", type=float, default=0.03)
     ap.add_argument("--lam", type=float, default=1.0,
@@ -175,7 +179,9 @@ def main() -> None:
             return emb(prompt), emb(response)
     else:
         from run_incontext_eval import HFBackend
-        backend = HFBackend(args.model, batch_size=1, target_layer=args.layer)
+        backend = HFBackend(args.model, batch_size=1, target_layer=args.layer,
+                            reserve_gib=args.reserve_gib,
+                            grad_checkpoint=args.reserve_gib > 0)
         model, tok = backend.model, backend.tokenizer
         device, model_dtype = backend.device, torch.bfloat16
         embed = model.get_input_embeddings()

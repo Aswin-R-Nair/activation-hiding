@@ -207,6 +207,9 @@ def main() -> None:
     ap.add_argument("--probe", default="harmful")
     ap.add_argument("--layer", type=int, default=TARGET_LAYER,
                     help="Residual layer the probe reads (default 12).")
+    ap.add_argument("--reserve-gib", type=float, default=0.0,
+                    help="Big multi-GPU models: reserve GiB/GPU for activations + "
+                    "auto-enable gradient checkpointing. Try 8. 0=off (9B).")
     ap.add_argument("--concept", default=None)
     ap.add_argument("--n", type=int, default=12, help="Samples per class.")
     ap.add_argument("--k", type=int, default=16, help="Soft-prefix length (tokens).")
@@ -250,7 +253,9 @@ def main() -> None:
     else:
         from run_incontext_eval import HFBackend
 
-        backend = HFBackend(args.model, batch_size=1, target_layer=args.layer)
+        backend = HFBackend(args.model, batch_size=1, target_layer=args.layer,
+                            reserve_gib=args.reserve_gib,
+                            grad_checkpoint=args.reserve_gib > 0)
         model = backend.model
         tok = backend.tokenizer
         device = backend.device
