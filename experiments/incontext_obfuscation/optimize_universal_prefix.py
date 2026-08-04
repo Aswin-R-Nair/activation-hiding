@@ -136,6 +136,8 @@ def main() -> None:
     ap.add_argument("--n", type=int, default=40, help="Samples per class (before split).")
     ap.add_argument("--test-frac", type=float, default=0.35)
     ap.add_argument("--k", type=int, default=16)
+    ap.add_argument("--layer", type=int, default=TARGET_LAYER,
+                    help="Residual layer the probe reads (default 12).")
     ap.add_argument("--steps", type=int, default=400)
     ap.add_argument("--lr", type=float, default=0.03)
     ap.add_argument("--lam", type=float, default=1.0,
@@ -173,12 +175,12 @@ def main() -> None:
             return emb(prompt), emb(response)
     else:
         from run_incontext_eval import HFBackend
-        backend = HFBackend(args.model, batch_size=1)
+        backend = HFBackend(args.model, batch_size=1, target_layer=args.layer)
         model, tok = backend.model, backend.tokenizer
         device, model_dtype = backend.device, torch.bfloat16
         embed = model.get_input_embeddings()
         embed_weight = embed.weight.detach()
-        forward_layer12 = make_real_layer12(model)  # updated to accept attention_mask
+        forward_layer12 = make_real_layer12(model, args.layer)
         supports_attn = True
         probe = LogisticProbe.load(probe_path, device=device, dtype=torch.float32)
 
@@ -287,7 +289,7 @@ def main() -> None:
         json.dump({"model": "MOCK" if args.mock else args.model, "probe": args.probe,
                    "concept": concept, "n": args.n, "test_frac": args.test_frac,
                    "k": args.k, "steps": args.steps, "lr": args.lr, "lam": args.lam,
-                   "proj_norm": bool(args.proj_norm), "layer": TARGET_LAYER}, f, indent=2)
+                   "proj_norm": bool(args.proj_norm), "layer": args.layer}, f, indent=2)
     # nearest tokens for interpretability
     if not args.mock:
         with torch.no_grad():

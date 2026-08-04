@@ -206,7 +206,7 @@ class ScratchpadHFBackend(HFBackend):
                     attention_mask=attn,
                     output_hidden_states=True,
                 )
-            hidden = out.hidden_states[TARGET_LAYER + 1]
+            hidden = out.hidden_states[self.target_layer + 1]
             reps = hidden.unsqueeze(1)
             batch_scores = probe.forward(reps, resp_mask.to(self.device))
             scores.extend(batch_scores.float().cpu().tolist())
@@ -420,6 +420,9 @@ def main() -> None:
     ap.add_argument("--n", type=int, default=24, help="Samples per class.")
     ap.add_argument("--rounds", type=int, default=12, help="Feedback rounds (N).")
     ap.add_argument("--batch-size", type=int, default=8)
+    ap.add_argument("--layer", type=int, default=TARGET_LAYER,
+                    help="Residual layer the probe reads (default 12). Use the "
+                    "scaling probe's _probe_meta.json layer for a non-gemma-9b model.")
     ap.add_argument(
         "--modes", nargs="+", default=["real", "blind", "random"],
         choices=["real", "blind", "random"],
@@ -444,7 +447,7 @@ def main() -> None:
         device, dtype = "cpu", torch.float32
         log.warning("MOCK MODE: scores are meaningless. Pipeline test only.")
     else:
-        backend = ScratchpadHFBackend(args.model, batch_size=args.batch_size)
+        backend = ScratchpadHFBackend(args.model, batch_size=args.batch_size, target_layer=args.layer)
         device, dtype = backend.device, torch.bfloat16
 
     probe = LogisticProbe.load(probe_path, device=device, dtype=dtype)
@@ -473,7 +476,7 @@ def main() -> None:
                 "model": "MOCK" if args.mock else args.model,
                 "probe": args.probe, "concept": concept, "mode": mode,
                 "n_per_class": args.n, "rounds": args.rounds,
-                "layer": TARGET_LAYER, "seed": args.seed,
+                "layer": args.layer, "seed": args.seed,
             }, f, indent=2)
 
         base = summary[summary["round"] == 0].iloc[0]

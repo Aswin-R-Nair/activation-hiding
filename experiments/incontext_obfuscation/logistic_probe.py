@@ -64,6 +64,13 @@ class LogisticProbe:
         Returns:
             scores: Tensor of shape [batch] with probe scores
         """
+        # Move inputs onto the probe's own device/dtype. Under multi-GPU
+        # device_map="auto" the extracted layer activations can live on a
+        # different GPU than the probe weights; this makes every caller safe.
+        reps = reps.to(device=self.device, dtype=self.dtype)
+        if mask is not None:
+            mask = mask.to(self.device)
+
         b, n_layers, seq_len, hidden_dim = reps.shape
 
         # Compute probabilities for each layer

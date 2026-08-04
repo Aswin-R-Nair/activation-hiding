@@ -69,13 +69,13 @@ class _StopForward(Exception):
     pass
 
 
-def make_real_layer12(model) -> Callable[[torch.Tensor], torch.Tensor]:
-    """Return f(inputs_embeds) -> layer-12 residual, differentiable.
+def make_real_layer12(model, layer: int = TARGET_LAYER) -> Callable[[torch.Tensor], torch.Tensor]:
+    """Return f(inputs_embeds) -> layer-`layer` residual, differentiable.
 
-    hidden_states[TARGET_LAYER + 1] == output of model.model.layers[TARGET_LAYER]
-    (0-indexed). We hook that layer and abort the forward there: layers above 12
-    never run, saving ~2/3 of compute+memory per step, and the captured tensor
-    keeps its autograd graph back to the soft prefix.
+    hidden_states[layer + 1] == output of model.model.layers[layer] (0-indexed).
+    We hook that layer and abort the forward there: layers above it never run,
+    saving compute+memory per step, and the captured tensor keeps its autograd
+    graph back to the soft prefix. (Name kept for import compatibility.)
     """
     layers = model.model.layers
 
@@ -86,7 +86,7 @@ def make_real_layer12(model) -> Callable[[torch.Tensor], torch.Tensor]:
             captured["h"] = out[0] if isinstance(out, tuple) else out
             raise _StopForward()
 
-        handle = layers[TARGET_LAYER].register_forward_hook(hook)
+        handle = layers[layer].register_forward_hook(hook)
         if attention_mask is None:
             attention_mask = torch.ones(
                 inputs_embeds.shape[:2], device=inputs_embeds.device, dtype=torch.long
@@ -205,6 +205,8 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--model", default="IlyaGusev/gemma-2-9b-it-abliterated")
     ap.add_argument("--probe", default="harmful")
+    ap.add_argument("--layer", type=int, default=TARGET_LAYER,
+                    help="Residual layer the probe reads (default 12).")
     ap.add_argument("--concept", default=None)
     ap.add_argument("--n", type=int, default=12, help="Samples per class.")
     ap.add_argument("--k", type=int, default=16, help="Soft-prefix length (tokens).")
@@ -248,14 +250,14 @@ def main() -> None:
     else:
         from run_incontext_eval import HFBackend
 
-        backend = HFBackend(args.model, batch_size=1)
+        backend = HFBackend(args.model, batch_size=1, target_layer=args.layer)
         model = backend.model
         tok = backend.tokenizer
         device = backend.device
         model_dtype = torch.bfloat16
         embed = model.get_input_embeddings()
         embed_weight = embed.weight.detach()
-        forward_layer12 = make_real_layer12(model)
+        forward_layer12 = make_real_layer12(model, args.layer)
         probe = LogisticProbe.load(probe_path, device=device, dtype=torch.float32)
         decode_tok = tok
 
@@ -323,7 +325,7 @@ def main() -> None:
     with open(outdir / "config.json", "w") as f:
         json.dump({"model": "MOCK" if args.mock else args.model, "probe": args.probe,
                    "concept": concept, "n_per_class": args.n, "k": args.k,
-                   "steps": args.steps, "lr": args.lr, "layer": TARGET_LAYER,
+                   "steps": args.steps, "lr": args.lr, "layer": args.layer,
                    "seed": args.seed}, f, indent=2)
 
     pd.set_option("display.width", 200)

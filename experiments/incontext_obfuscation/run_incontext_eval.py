@@ -139,8 +139,11 @@ class HFBackend:
         dtype: torch.dtype = torch.bfloat16,
         device_map: str = "auto",
         batch_size: int = 4,
+        target_layer: int = TARGET_LAYER,
     ):
         from transformers import AutoModelForCausalLM, AutoTokenizer
+
+        self.target_layer = target_layer
 
         log.info("Loading model %s ...", model_id)
         self.model = AutoModelForCausalLM.from_pretrained(
@@ -209,7 +212,7 @@ class HFBackend:
                     output_hidden_states=True,
                 )
             # hidden_states[0] is the embedding output, so layer L is index L+1.
-            hidden = out.hidden_states[TARGET_LAYER + 1]  # [b, seq, hidden]
+            hidden = out.hidden_states[self.target_layer + 1]  # [b, seq, hidden]
             reps = hidden.unsqueeze(1)  # [b, 1, seq, hidden]
 
             batch_scores = probe.forward(reps, resp_mask.to(self.device))
@@ -341,6 +344,10 @@ def main() -> None:
         "paper found 'lying' works better than 'deception' for the deception probe.",
     )
     ap.add_argument("--n", type=int, default=50, help="Samples per class.")
+    ap.add_argument("--layer", type=int, default=TARGET_LAYER,
+                    help="Residual-stream layer the probe reads. Default 12 "
+                    "(gemma-2-9b probes). For a scaling probe, use the layer from "
+                    "its *_probe_meta.json.")
     ap.add_argument("--batch-size", type=int, default=4)
     ap.add_argument("--mock", action="store_true", help="Run without model weights.")
     ap.add_argument(
@@ -373,7 +380,7 @@ def main() -> None:
         device, dtype = "cpu", torch.float32
         log.warning("MOCK MODE: scores are random. Pipeline test only.")
     else:
-        backend = HFBackend(args.model, batch_size=args.batch_size)
+        backend = HFBackend(args.model, batch_size=args.batch_size, target_layer=args.layer)
         device, dtype = backend.device, torch.bfloat16
 
     probe = LogisticProbe.load(probe_path, device=device, dtype=dtype)
@@ -394,7 +401,7 @@ def main() -> None:
                 "probe": args.probe,
                 "concept": concept,
                 "n_per_class": args.n,
-                "layer": TARGET_LAYER,
+                "layer": args.layer,
                 "conditions": [c.name for c in conds],
             },
             f,
