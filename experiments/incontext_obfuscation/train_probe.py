@@ -130,8 +130,18 @@ def main() -> None:
     ap.add_argument("--model", default="google/gemma-2-27b-it")
     ap.add_argument("--probe", default="harmful", help="Probe/dataset name (content-based only).")
     ap.add_argument("--layers", default="20,24,28,32", help="Comma-separated layers to scan.")
-    ap.add_argument("--n", type=int, default=100, help="Samples per class (train+test).")
-    ap.add_argument("--test-frac", type=float, default=0.3)
+    ap.add_argument("--n", type=int, default=100, help="Total samples per class to load.")
+    ap.add_argument("--reserve", type=int, default=0,
+                    help="Hold out the FIRST N samples/class for the experiments and "
+                    "train the probe ONLY on the rest. Set this = the --n you will "
+                    "pass to the experiment scripts, so probe-training data is "
+                    "DISJOINT from experiment data (avoids the probe having seen the "
+                    "exact samples it is later asked to be fooled on). E.g. "
+                    "--n 100 --reserve 50 trains on samples 50-100; then run "
+                    "experiments with --n 50 (samples 0-50).")
+    ap.add_argument("--test-frac", type=float, default=0.3,
+                    help="Held-out fraction WITHIN the probe-training pool (for the "
+                    "layer-scan AUROC).")
     ap.add_argument("--steps", type=int, default=300)
     ap.add_argument("--lr", type=float, default=0.02)
     ap.add_argument("--l2", type=float, default=1e-3)
@@ -151,6 +161,13 @@ def main() -> None:
 
     # ---- data + backend --------------------------------------------------
     pos, neg = load_samples(args.probe, args.n)
+    if args.reserve > 0:
+        if args.reserve >= len(pos):
+            raise SystemExit(f"--reserve {args.reserve} >= available {len(pos)}/class; "
+                             "nothing left to train the probe on.")
+        pos, neg = pos[args.reserve:], neg[args.reserve:]
+        log.info("RESERVED first %d/class for experiments; training probe on the "
+                 "remaining %d/class (DISJOINT).", args.reserve, len(pos))
 
     if args.mock:
         log.warning("MOCK: synthetic acts with a PLANTED separable direction "
@@ -205,8 +222,10 @@ def main() -> None:
     probe_path = PROBES_DIR / f"{out_name}_weights.pt"
     torch.save(weights_dict, probe_path)
     meta = {"model": model_id, "probe": args.probe, "layer": L_best, "hidden": hidden,
-            "test_auroc": te_best, "layer_scan": results, "n_per_class": args.n,
-            "content_based": True}
+            "test_auroc": te_best, "layer_scan": results,
+            "probe_pool_per_class": len(acts_by_layer[L_best][0]),
+            "reserved_for_experiments": args.reserve, "l2": args.l2,
+            "content_based": True, "experiment_disjoint": args.reserve > 0}
     (PROBES_DIR / f"{out_name}_probe_meta.json").write_text(json.dumps(meta, indent=2))
 
     # verify it round-trips through the real loader
@@ -220,7 +239,14 @@ def main() -> None:
         star = "  <- saved" if r["layer"] == L_best else ""
         print(f"  layer {r['layer']:>3}  train {r['train_auroc']:.4f}  test {r['test_auroc']:.4f}{star}")
     print(f"\nSaved {probe_path.name} (layer {L_best}) + {out_name}_probe_meta.json")
-    print(f"Run experiments with:  --probe {out_name} --layer {L_best}")
+    if args.reserve > 0:
+        print(f"Probe trained on {len(pos)}/class (samples {args.reserve}-{args.n}), "
+              f"DISJOINT from experiments.")
+        print(f"Run experiments with:  --probe {out_name} --layer {L_best} --n {args.reserve}")
+    else:
+        print(f"Run experiments with:  --probe {out_name} --layer {L_best}")
+        print("WARNING: --reserve 0 -> probe trained on ALL samples; experiments will "
+              "run on data the probe has SEEN. Use --reserve to keep them disjoint.")
     if not args.mock and te_best < 0.85:
         print("\nWARNING: best test AUROC < 0.85 -- weak probe. Try more layers / more "
               "n / check the model actually represents the concept at these layers.")
