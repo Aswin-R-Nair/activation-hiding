@@ -207,7 +207,10 @@ def main() -> None:
              len(pos_tr), len(neg_tr), len(pos_te), len(neg_te))
 
     # ---- baselines (no prefix) --------------------------------------------
-    empty = torch.zeros(0, HIDDEN_DIM, device=device, dtype=model_dtype)
+    # Use the ACTUAL model hidden size (8192 for Llama-70B), not the gemma-9b
+    # constant -- the empty-prefix baseline must cat with the model's embeddings.
+    hidden = embed_weight.shape[1]
+    empty = torch.zeros(0, hidden, device=device, dtype=model_dtype)
     def base_scores(samples):
         return eval_scores(forward_layer12, probe, empty, samples, model_dtype, device,
                            supports_attn, args.micro_batch)
