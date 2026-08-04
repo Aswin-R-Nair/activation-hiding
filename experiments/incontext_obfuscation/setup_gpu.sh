@@ -17,7 +17,7 @@ set -euo pipefail
 
 REPO_URL="https://github.com/Aswin-R-Nair/neural-chameleons.git"
 BRANCH="incontext-obfuscation"
-CLONE_DIR="${HOME}/neural-chameleons"
+CLONE_DIR="/neural-chameleons"
 EXP_SUBDIR="experiments/incontext_obfuscation"
 
 bold() { printf '\033[1m%s\033[0m\n' "$*"; }
