@@ -87,13 +87,15 @@ def load_deception_samples(n: int) -> Tuple[List[Sample], List[Sample]]:
 
 
 def load_samples(probe_name: str, n: int) -> Tuple[List[Sample], List[Sample]]:
-    if probe_name == "harmful":
+    # Match by prefix so a scaling probe named e.g. "harmful_Llama-3.3-70B-..."
+    # still resolves to the harmful dataset. (Probe *filename* != dataset name.)
+    if probe_name.startswith("harmful"):
         return load_harmful_samples(n)
-    if probe_name == "deception":
+    if probe_name.startswith("deception"):
         return load_deception_samples(n)
     raise ValueError(
-        f"No dataset wired up for probe '{probe_name}'. "
-        "Use --probe harmful or --probe deception."
+        f"No dataset wired up for probe '{probe_name}'. Name must start with "
+        "'harmful' or 'deception' so the dataset can be resolved."
     )
 
 
