@@ -200,6 +200,7 @@ def main() -> None:
 
     results = []
     best = None
+    per_layer = {}  # L -> (w, b) so we can save a probe at EVERY layer
     for L in layers:
         pa, na = acts_by_layer[L]
         pa_tr, pa_te = split(pa); na_tr, na_te = split(na)
@@ -208,6 +209,7 @@ def main() -> None:
         te = eval_auroc(w, b, pa_te, na_te, device)
         log.info("layer %d: train AUROC %.4f | TEST AUROC %.4f", L, tr, te)
         results.append({"layer": L, "train_auroc": tr, "test_auroc": te})
+        per_layer[L] = (w.cpu(), b.cpu())
         if best is None or te > best[0]:
             best = (te, L, w.cpu(), b.cpu())
 
@@ -221,11 +223,20 @@ def main() -> None:
     out_name = f"{args.probe}_{'MOCK' if args.mock else args.model.split('/')[-1]}"
     probe_path = PROBES_DIR / f"{out_name}_weights.pt"
     torch.save(weights_dict, probe_path)
+    # Also save a probe PER scanned layer, so the experiments can sweep layers
+    # (probe AUROC saturates, so the best-AUROC layer is not necessarily the most
+    # prefix-steerable -- a layer-robustness check needs a probe at each layer).
+    layer_probe_names = {}
+    for L, (w, b) in per_layer.items():
+        name = f"{out_name}_L{L}"
+        torch.save({0: {"weight": w.numpy(), "bias": b.numpy()}}, PROBES_DIR / f"{name}_weights.pt")
+        layer_probe_names[L] = name
     meta = {"model": model_id, "probe": args.probe, "layer": L_best, "hidden": hidden,
             "test_auroc": te_best, "layer_scan": results,
             "probe_pool_per_class": len(acts_by_layer[L_best][0]),
             "reserved_for_experiments": args.reserve, "l2": args.l2,
-            "content_based": True, "experiment_disjoint": args.reserve > 0}
+            "content_based": True, "experiment_disjoint": args.reserve > 0,
+            "per_layer_probes": layer_probe_names}
     (PROBES_DIR / f"{out_name}_probe_meta.json").write_text(json.dumps(meta, indent=2))
 
     # verify it round-trips through the real loader
