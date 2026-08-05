@@ -26,15 +26,18 @@ KVALS="${KVALS:-4 16 64 128}"
 LAMS="${LAMS:-5 10}"
 COVERAGE_LAYERS="${COVERAGE_LAYERS:-20 40 60}"   # early/mid/late, always tested
 KSWEEP_LAYER="${KSWEEP_LAYER:-30}"
+BATCH="${BATCH:-8}"              # forward-only steps (probe scan, screen)
+MICRO_BATCH="${MICRO_BATCH:-16}" # gradient steps (optimize_universal_prefix)
+RESERVE_GIB="${RESERVE_GIB:-0}"  # bump to ~6 if a gradient run OOMs
 
 run() { echo; echo ">>> $*"; "$@" || echo "!!! FAILED (continuing): $*"; }
 
 echo "=== A. per-layer probe scan (layers $SCAN_LAYERS) ==="
 run python train_probe.py --model "$MODEL" --probe harmful \
-    --layers "$SCAN_LAYERS" --n 100 --reserve "$N" --l2 1e-2 --steps 300 --batch-size 16
+    --layers "$SCAN_LAYERS" --n 100 --reserve "$N" --l2 1e-2 --steps 300 --batch-size "$BATCH"
 
 echo "=== B. all-layer single-shot screen ==="
-run python screen_layers.py --model "$MODEL" --probe "$PROBE" --n "$N" --batch-size 16
+run python screen_layers.py --model "$MODEL" --probe "$PROBE" --n "$N" --batch-size "$BATCH"
 
 # Pick the 2 most prefix-perturbable layers from the screen, union with coverage.
 SCREEN_CSV="outputs/${BASENAME}_${PROBE}_layerscreen/perturbability_by_layer.csv"
@@ -57,7 +60,7 @@ for L in $GRAD_LAYERS; do
     run python optimize_universal_prefix.py --model "$MODEL" \
         --probe "${PROBE}_L${L}" --layer "$L" \
         --n "$N" --test-frac 0.35 --k 16 --steps 400 --lr 0.03 \
-        --proj-norm --lam "$LAM" --reserve-gib 0 --micro-batch 32 \
+        --proj-norm --lam "$LAM" --reserve-gib "$RESERVE_GIB" --micro-batch "$MICRO_BATCH" \
         --tag "70b_layer${L}_lam${LAM}"
   done
 done
@@ -67,7 +70,7 @@ for K in $KVALS; do
   run python optimize_universal_prefix.py --model "$MODEL" \
       --probe "${PROBE}_L${KSWEEP_LAYER}" --layer "$KSWEEP_LAYER" \
       --n "$N" --test-frac 0.35 --k "$K" --steps 400 --lr 0.03 \
-      --proj-norm --lam 5 --reserve-gib 0 --micro-batch 32 \
+      --proj-norm --lam 5 --reserve-gib "$RESERVE_GIB" --micro-batch "$MICRO_BATCH" \
       --tag "70b_ksweep_k${K}"
 done
 
