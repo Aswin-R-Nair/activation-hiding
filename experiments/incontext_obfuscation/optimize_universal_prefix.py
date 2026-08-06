@@ -7,9 +7,10 @@ HARMFUL passages while leaving BENIGN passages scoring normally? That selectivit
 paper's finetuning achieves.
 
 Why this is the definitive test. A real token prefix, once embedded, is a
-*specific point* in embedding space; a soft prefix can be *any* point. So an
-UNCONSTRAINED universal soft prefix is the most powerful preceding-context
-intervention that exists -- strictly more powerful than any prompt. We optimise
+*specific point* in embedding space; a soft prefix can be *any* point. So a
+universal soft prefix (even norm-bounded via --proj-norm) is the most powerful
+preceding-context intervention that exists -- strictly more powerful than any
+prompt, because it need not correspond to any emittable token. We optimise
 ONE shared soft prefix to:
     minimise probe score on positives   (push harmful down)
   + lambda * hinge(keep negatives >= their baseline)   (do NOT let benign fall)
@@ -17,8 +18,9 @@ and evaluate on a HELD-OUT split (so it is a universal direction, not memorised)
 
 Reading it (test split is what counts):
   * test_pos falls toward test_neg AND test_neg stays ~baseline  -> content-
-    SELECTIVE suppression is reachable in continuous space. Your hypothesis is
-    alive; next is discretisation / GCG to find real tokens near that point.
+    SELECTIVE suppression is reachable in continuous space. Check the DISCRETE
+    table (auto-run): if snapping to real tokens keeps the suppression, a real
+    prompt can do it; if it collapses, the selectivity was off the token manifold.
   * test_pos will NOT fall while neg is held  -> even the most powerful possible
     prefix cannot selectively suppress. Since prompts are a strict subset, NO
     prompt can. Airtight negative for the obfuscation question.
@@ -262,49 +264,73 @@ def main() -> None:
             log.info("step %d/%d  pos_loss %.4f  neg_hinge %.4f",
                      step, args.steps, tot_pos, tot_neg)
 
-    # ---- evaluate ---------------------------------------------------------
+    # ---- evaluate the optimised SOFT prefix -------------------------------
     p = {"train_pos": eval_scores(forward_layer12, probe, prefix, pos_tr, model_dtype, device, supports_attn, args.micro_batch),
          "train_neg": eval_scores(forward_layer12, probe, prefix, neg_tr, model_dtype, device, supports_attn, args.micro_batch),
          "test_pos": eval_scores(forward_layer12, probe, prefix, pos_te, model_dtype, device, supports_attn, args.micro_batch),
          "test_neg": eval_scores(forward_layer12, probe, prefix, neg_te, model_dtype, device, supports_attn, args.micro_batch)}
 
+    # ---- DISCRETISE: force the prefix onto REAL tokens --------------------
+    # proj-norm bounds the soft prefix's MAGNITUDE but not its position -- it can
+    # sit between tokens, somewhere the model can never emit. Project each of the k
+    # vectors to its nearest real-token embedding (cosine) and RE-EVALUATE with
+    # those ACTUAL token embeddings (real norms, not the projected median). Only a
+    # tokenisable prefix is something the model could produce in-context, so this is
+    # the load-bearing check: if the selective suppression was an off-token-manifold
+    # artefact, the discrete pos_drop collapses toward zero.
+    with torch.no_grad():
+        Wn = F.normalize(embed_weight.float(), dim=-1)
+        disc_ids = (F.normalize(prefix.detach(), dim=-1) @ Wn.T).argmax(dim=-1)
+        disc_prefix = embed_weight[disc_ids].to(device=device).float()  # [k,H]
+    d = {"train_pos": eval_scores(forward_layer12, probe, disc_prefix, pos_tr, model_dtype, device, supports_attn, args.micro_batch),
+         "train_neg": eval_scores(forward_layer12, probe, disc_prefix, neg_tr, model_dtype, device, supports_attn, args.micro_batch),
+         "test_pos": eval_scores(forward_layer12, probe, disc_prefix, pos_te, model_dtype, device, supports_attn, args.micro_batch),
+         "test_neg": eval_scores(forward_layer12, probe, disc_prefix, neg_te, model_dtype, device, supports_attn, args.micro_batch)}
+
     thr1 = threshold_at_fpr(b["test_neg"], 0.01)
-    summary = pd.DataFrame([{
-        "split": "TEST (held out)",
-        "baseline_pos": float(b["test_pos"].mean()), "prefix_pos": float(p["test_pos"].mean()),
-        "baseline_neg": float(b["test_neg"].mean()), "prefix_neg": float(p["test_neg"].mean()),
-        "baseline_auroc": auroc(b["test_pos"], b["test_neg"]),
-        "prefix_auroc": auroc(p["test_pos"], p["test_neg"]),
-        "baseline_tpr1pct": tpr_at_threshold(b["test_pos"], thr1),
-        "prefix_tpr1pct": tpr_at_threshold(p["test_pos"], thr1),
-        "pos_drop": float(b["test_pos"].mean() - p["test_pos"].mean()),
-        "neg_drop": float(b["test_neg"].mean() - p["test_neg"].mean()),
-    }, {
-        "split": "train",
-        "baseline_pos": float(b["train_pos"].mean()), "prefix_pos": float(p["train_pos"].mean()),
-        "baseline_neg": float(b["train_neg"].mean()), "prefix_neg": float(p["train_neg"].mean()),
-        "baseline_auroc": auroc(b["train_pos"], b["train_neg"]),
-        "prefix_auroc": auroc(p["train_pos"], p["train_neg"]),
-        "baseline_tpr1pct": np.nan, "prefix_tpr1pct": np.nan,
-        "pos_drop": float(b["train_pos"].mean() - p["train_pos"].mean()),
-        "neg_drop": float(b["train_neg"].mean() - p["train_neg"].mean()),
-    }])
+
+    def summarise(prefixed) -> pd.DataFrame:
+        """Two-row (TEST/train) table for a given prefixed-scores dict vs baseline b."""
+        def row(split, sp_key, sn_key, with_tpr):
+            bp, bn = b[sp_key], b[sn_key]
+            pp, pn = prefixed[sp_key], prefixed[sn_key]
+            return {
+                "split": split,
+                "baseline_pos": float(bp.mean()), "prefix_pos": float(pp.mean()),
+                "baseline_neg": float(bn.mean()), "prefix_neg": float(pn.mean()),
+                "baseline_auroc": auroc(bp, bn), "prefix_auroc": auroc(pp, pn),
+                "baseline_tpr1pct": tpr_at_threshold(bp, thr1) if with_tpr else np.nan,
+                "prefix_tpr1pct": tpr_at_threshold(pp, thr1) if with_tpr else np.nan,
+                "pos_drop": float(bp.mean() - pp.mean()),
+                "neg_drop": float(bn.mean() - pn.mean()),
+            }
+        return pd.DataFrame([row("TEST (held out)", "test_pos", "test_neg", True),
+                             row("train", "train_pos", "train_neg", False)])
+
+    summary = summarise(p)             # SOFT prefix (unchanged schema; sweep parses this)
+    summary_disc = summarise(d)        # DISCRETE (nearest-real-token) prefix
 
     tag = args.tag or ("mock" if args.mock else args.model.split("/")[-1])
     outdir = OUTPUT_DIR / f"{tag}_{args.probe}_univprefix"
     outdir.mkdir(parents=True, exist_ok=True)
     summary.to_csv(outdir / "summary.csv", index=False)
+    summary_disc.to_csv(outdir / "summary_discrete.csv", index=False)
     with open(outdir / "config.json", "w") as f:
         json.dump({"model": "MOCK" if args.mock else args.model, "probe": args.probe,
                    "concept": concept, "n": args.n, "test_frac": args.test_frac,
                    "k": args.k, "steps": args.steps, "lr": args.lr, "lam": args.lam,
                    "proj_norm": bool(args.proj_norm), "layer": args.layer}, f, indent=2)
-    # nearest tokens for interpretability
+    # save the optimised soft prefix + its nearest-token ids so the discrete /
+    # any later analysis can be redone offline WITHOUT re-optimising (expensive on 70B).
+    torch.save({"prefix": prefix.detach().cpu(), "disc_ids": disc_ids.cpu()},
+               outdir / "prefix.pt")
+    # nearest tokens for interpretability (same projection the discrete eval uses)
     if not args.mock:
-        with torch.no_grad():
-            Wn = F.normalize(embed_weight.float(), dim=-1)
-            ids = (F.normalize(prefix, dim=-1) @ Wn.T).argmax(dim=-1)
-            (outdir / "nearest_prefix.txt").write_text(tok.decode(ids.tolist()))
+        (outdir / "nearest_prefix.txt").write_text(tok.decode(disc_ids.tolist()))
+
+    soft_pd = float(summary.iloc[0]["pos_drop"])
+    disc_pd = float(summary_disc.iloc[0]["pos_drop"])
+    retained = disc_pd / soft_pd if abs(soft_pd) > 1e-6 else float("nan")
 
     pd.set_option("display.width", 220)
     print("\n" + "=" * 100)
@@ -312,10 +338,16 @@ def main() -> None:
           f"| probe={args.probe} | k={args.k} | steps={args.steps} | lam={args.lam} "
           f"| proj_norm={bool(args.proj_norm)}")
     print("=" * 100)
+    print("\n[SOFT prefix] -- continuous, norm-bounded, need NOT be tokenisable:")
     print(summary.to_string(index=False, float_format=lambda x: f"{x:.4f}"))
-    print("\nRead the TEST row. Selective obfuscation = pos_drop large, neg_drop ~0,")
+    print("\n[DISCRETE prefix] -- soft vectors snapped to nearest REAL tokens (emittable):")
+    print(summary_disc.to_string(index=False, float_format=lambda x: f"{x:.4f}"))
+    print(f"\nTEST pos_drop  soft={soft_pd:.4f}  discrete={disc_pd:.4f}  "
+          f"retained={retained:.1%} of the soft suppression survives on real tokens.")
+    print("Read the TEST rows. Selective obfuscation = pos_drop large, neg_drop ~0,")
     print("prefix_auroc -> 0.5. Content-blind = pos_drop AND neg_drop both large.")
-    print("No lever = pos_drop ~0. (neg_drop is the selective-vs-blind discriminator.)")
+    print("KEY: if the SOFT prefix suppresses but the DISCRETE one does not (retained ~0),")
+    print("the selectivity lived off the token manifold -- unreachable by a real prompt.")
     print(f"\nWrote {outdir}")
 
 
