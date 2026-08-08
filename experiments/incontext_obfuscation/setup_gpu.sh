@@ -17,7 +17,7 @@ set -euo pipefail
 
 REPO_URL="https://github.com/Aswin-R-Nair/neural-chameleons.git"
 BRANCH="incontext-obfuscation"
-CLONE_DIR="/neural-chameleons"
+CLONE_DIR="/workspace/neural-chameleons"
 EXP_SUBDIR="experiments/incontext_obfuscation"
 
 bold() { printf '\033[1m%s\033[0m\n' "$*"; }
@@ -89,6 +89,7 @@ elif [ -d "${CLONE_DIR}/.git" ]; then
     REPO_ROOT="${CLONE_DIR}"
 else
     echo "cloning ${REPO_URL} (branch ${BRANCH}) into ${CLONE_DIR}"
+    mkdir -p "$(dirname "${CLONE_DIR}")"
     git clone --depth 1 --branch "${BRANCH}" "${REPO_URL}" "${CLONE_DIR}"
     REPO_ROOT="${CLONE_DIR}"
 fi
