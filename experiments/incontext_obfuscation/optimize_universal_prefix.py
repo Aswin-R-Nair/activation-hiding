@@ -278,10 +278,13 @@ def main() -> None:
     # tokenisable prefix is something the model could produce in-context, so this is
     # the load-bearing check: if the selective suppression was an off-token-manifold
     # artefact, the discrete pos_drop collapses toward zero.
+    # Do the nearest-token projection on CPU: F.normalize(embed_weight.float()) is a
+    # ~vocab*H*4B (>4GB for 70B) tensor -- materialising it on the packed shard-0 GPU
+    # OOMs. The matmul is one-time, so CPU cost is negligible.
     with torch.no_grad():
-        Wn = F.normalize(embed_weight.float(), dim=-1)
-        disc_ids = (F.normalize(prefix.detach(), dim=-1) @ Wn.T).argmax(dim=-1)
-        disc_prefix = embed_weight[disc_ids].to(device=device).float()  # [k,H]
+        Wn_cpu = F.normalize(embed_weight.detach().float().cpu(), dim=-1)
+        disc_ids = (F.normalize(prefix.detach().float().cpu(), dim=-1) @ Wn_cpu.T).argmax(dim=-1)
+        disc_prefix = embed_weight[disc_ids.to(embed_weight.device)].to(device=device).float()  # [k,H]
     d = {"train_pos": eval_scores(forward_layer12, probe, disc_prefix, pos_tr, model_dtype, device, supports_attn, args.micro_batch),
          "train_neg": eval_scores(forward_layer12, probe, disc_prefix, neg_tr, model_dtype, device, supports_attn, args.micro_batch),
          "test_pos": eval_scores(forward_layer12, probe, disc_prefix, pos_te, model_dtype, device, supports_attn, args.micro_batch),
