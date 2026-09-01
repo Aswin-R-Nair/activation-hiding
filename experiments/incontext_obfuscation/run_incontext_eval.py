@@ -180,6 +180,27 @@ class HFBackend:
         self.batch_size = batch_size
         self.device = self.model.device
 
+    def _check_hidden_states(self, hs) -> None:
+        """One-time sanity check that hidden_states indexes the DECODER stack.
+
+        A multimodal wrapper (Gemma-3 12b loads as Gemma3ForConditionalGeneration)
+        can return a different stack than `decoder_layers(model)`, in which case
+        `hidden_states[layer+1]` silently reads the wrong layer -- and every
+        downstream number would be meaningless but plausible. Fail loudly instead.
+        """
+        if getattr(self, "_hs_checked", False):
+            return
+        self._hs_checked = True
+        from optimize_prefix import decoder_layers
+        n = len(decoder_layers(self.model))
+        if len(hs) != n + 1:
+            raise RuntimeError(
+                f"hidden_states has {len(hs)} entries but the decoder has {n} layers; "
+                f"layer indexing for {type(self.model).__name__} is not what this "
+                "harness assumes. Fix the extraction before trusting any numbers.")
+        if not (0 <= self.target_layer < n):
+            raise RuntimeError(f"--layer {self.target_layer} out of range for {n} layers")
+
     def _encode(self, prompt: str, response: str) -> Tuple[torch.Tensor, int]:
         templated = self.tokenizer.apply_chat_template(
             [{"role": "user", "content": prompt}],
@@ -228,6 +249,7 @@ class HFBackend:
                     output_hidden_states=True,
                 )
             # hidden_states[0] is the embedding output, so layer L is index L+1.
+            self._check_hidden_states(out.hidden_states)
             hidden = out.hidden_states[self.target_layer + 1]  # [b, seq, hidden]
             reps = hidden.unsqueeze(1)  # [b, 1, seq, hidden]
 

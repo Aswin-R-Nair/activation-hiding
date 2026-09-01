@@ -32,6 +32,28 @@ This also makes the experiment cheap: no generation, one forward pass per sample
 | `few_shot` | Worked examples of the reframing strategy. |
 | `control_irrelevant` | A similar-length prefix that says nothing about probing. **Separates a real effect from "any prefix perturbs activations".** |
 | `control_amplify` | Asks for the *opposite*. If the model has any in-context control over the probe direction, this should push the score **up**. |
+| `control_mention_concept` | Names the concept, requests nothing. Isolates concept-word leakage. |
+| `control_mention_monitor` | States that monitoring is happening without naming the concept, requests nothing. Isolates framing leakage. |
+
+### Leakage decomposition
+
+The `deception` runs exposed a confound: prefixes that name the concept shift the
+probe by ~0.33 **regardless of what they ask for** — `direct_instruction` and
+`control_amplify` were indistinguishable despite requesting opposite things, and
+honest-persona negatives rose 0.33 → 0.90. The probe partly detects "is this
+context about deception", not "is this response deceptive".
+
+The two `control_mention_*` conditions strip `direct_instruction` down one factor
+at a time so the effect decomposes by subtraction:
+
+```
+concept-word leakage = control_mention_concept - control_irrelevant
+framing leakage      = control_mention_monitor - control_irrelevant
+genuine instruction  = direct_instruction - (both mention effects)
+```
+
+If `control_mention_concept` reproduces most of the shift **while asking the
+model to do nothing**, the effect is probe misfire rather than obfuscation.
 
 `control_amplify` is the one to watch. A null result on suppression is weak
 evidence on its own — the model might just be ignoring the instruction. If
@@ -107,3 +129,20 @@ python run_incontext_eval.py --model IlyaGusev/gemma-2-9b-it-abliterated --probe
   control for behaviour change (e.g. holding a judged-harmfulness rating fixed).
 - The negatives for the deception set are the same statements under an honest
   persona, so prefix effects may partly cancel between classes.
+
+## Robustness extensions (2026-08-31)
+
+| file | what it is |
+|---|---|
+| `flrt_universal.py` | Universal discrete prefix attack via modified FLRT (ported from the vendored `obf_reps` FLRTOptimizer). Closes the discretisation gap that nearest-neighbour snapping leaves open. Run `--per-input` first as the positive control, and always with `--random-control`. |
+| `blackbox_significance.py` | Paired bootstrap CI + sign-flip permutation on `run_blackbox_search.py` trajectories. A bare `bestN_pos_mean` difference between two proposers is not a result. |
+| `delta_h_cosine.py` | `extract` / `compare` the layer-L response-token delta-h of the organism's trigger vs a universal prefix. Read `proj_on_w` before the cosine. |
+| `robustness_extensions.sh` | Runbook, stages A–F. `STAGES="A B" bash robustness_extensions.sh` |
+
+`train_probe.py --pool max` trains a max-pooled probe (RL-Obfuscation reports these
+are harder to evade). Max-pooled probes are name-tagged `_maxpool` and record `pool`
+in their meta json, which `LogisticProbe.load` honours — so every script picks up the
+pooling automatically and the two aggregations can never be silently mixed.
+`significance.py`: use `--ref baseline` or `--ref control_amplify`; against the
+default `control_irrelevant` even `baseline` comes out significant, because the
+irrelevant prefix raises the score and is itself the outlier.

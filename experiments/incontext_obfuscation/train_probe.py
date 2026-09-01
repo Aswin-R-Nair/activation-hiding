@@ -90,12 +90,25 @@ def extract_multi_layer(backend, samples, layers: List[int]) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def sample_score(w: torch.Tensor, b: torch.Tensor, acts: torch.Tensor) -> torch.Tensor:
-    """acts [seq, H] -> scalar = mean_t sigmoid(w.h_t + b). Differentiable."""
-    return torch.sigmoid(acts @ w.squeeze(0) + b).mean()
+def sample_score(w: torch.Tensor, b: torch.Tensor, acts: torch.Tensor,
+                 pool: str = "mean", tau: float = 0.1) -> torch.Tensor:
+    """acts [seq, H] -> scalar, matching LogisticProbe's aggregation exactly.
+
+    pool="mean": mean_t sigmoid(w.h_t + b)  -- the shipped aggregation.
+    pool="max":  max_t  sigmoid(w.h_t + b)  -- score by the single most
+        incriminating token. Trained with the same straight-through estimator the
+        probe uses at attack time (exact max forward, softmax-tau backward), so a
+        hard max cannot starve the fit by routing gradient to one token per sample.
+    """
+    per_token = torch.sigmoid(acts @ w.squeeze(0) + b)
+    if pool == "mean":
+        return per_token.mean()
+    hard = per_token.max()
+    soft = (torch.softmax(per_token.detach() / max(tau, 1e-6), dim=0) * per_token).sum()
+    return soft + (hard - soft).detach()
 
 
-def train_logistic(pos_acts, neg_acts, hidden, steps, lr, l2, device):
+def train_logistic(pos_acts, neg_acts, hidden, steps, lr, l2, device, pool="mean"):
     w = torch.zeros(1, hidden, device=device, requires_grad=True)
     b = torch.zeros(1, device=device, requires_grad=True)
     opt = torch.optim.Adam([w, b], lr=lr)
@@ -104,7 +117,7 @@ def train_logistic(pos_acts, neg_acts, hidden, steps, lr, l2, device):
     bce = torch.nn.BCELoss()
     for step in range(steps):
         opt.zero_grad()
-        s = torch.stack([sample_score(w, b, a) for a in acts]).clamp(1e-6, 1 - 1e-6)
+        s = torch.stack([sample_score(w, b, a, pool) for a in acts]).clamp(1e-6, 1 - 1e-6)
         loss = bce(s, y) + l2 * (w ** 2).sum()
         loss.backward()
         opt.step()
@@ -113,10 +126,10 @@ def train_logistic(pos_acts, neg_acts, hidden, steps, lr, l2, device):
     return w.detach(), b.detach()
 
 
-def eval_auroc(w, b, pos_acts, neg_acts, device) -> float:
+def eval_auroc(w, b, pos_acts, neg_acts, device, pool="mean") -> float:
     with torch.no_grad():
-        ps = np.array([float(sample_score(w, b, a.to(device))) for a in pos_acts])
-        ns = np.array([float(sample_score(w, b, a.to(device))) for a in neg_acts])
+        ps = np.array([float(sample_score(w, b, a.to(device), pool)) for a in pos_acts])
+        ns = np.array([float(sample_score(w, b, a.to(device), pool)) for a in neg_acts])
     return auroc(ps, ns)
 
 
@@ -147,6 +160,14 @@ def main() -> None:
     ap.add_argument("--l2", type=float, default=1e-3)
     ap.add_argument("--batch-size", type=int, default=4)
     ap.add_argument("--mock", action="store_true")
+    ap.add_argument("--pool", default="mean", choices=["mean", "max"],
+                    help="Sequence aggregation. 'mean' is the shipped Neural "
+                         "Chameleons probe. 'max' scores by the most incriminating "
+                         "token; RL-Obfuscation reports max-pooled probes are harder "
+                         "to evade, so a max-pooled probe is the stricter monitor to "
+                         "run the attacks against. Saved probes are name-tagged "
+                         "'_maxpool' and record the pooling in their meta json, which "
+                         "LogisticProbe.load honours -- the two are never mixed.")
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
 
@@ -204,9 +225,10 @@ def main() -> None:
     for L in layers:
         pa, na = acts_by_layer[L]
         pa_tr, pa_te = split(pa); na_tr, na_te = split(na)
-        w, b = train_logistic(pa_tr, na_tr, hidden, args.steps, args.lr, args.l2, device)
-        tr = eval_auroc(w, b, pa_tr, na_tr, device)
-        te = eval_auroc(w, b, pa_te, na_te, device)
+        w, b = train_logistic(pa_tr, na_tr, hidden, args.steps, args.lr, args.l2,
+                              device, args.pool)
+        tr = eval_auroc(w, b, pa_tr, na_tr, device, args.pool)
+        te = eval_auroc(w, b, pa_te, na_te, device, args.pool)
         log.info("layer %d: train AUROC %.4f | TEST AUROC %.4f", L, tr, te)
         results.append({"layer": L, "train_auroc": tr, "test_auroc": te})
         per_layer[L] = (w.cpu(), b.cpu())
@@ -220,7 +242,8 @@ def main() -> None:
     weights_dict = {0: {"weight": w_best.numpy(), "bias": b_best.numpy()}}
     # NEVER reuse a shipped probe name -- always model-qualified (mock included),
     # so a training run cannot clobber probes/harmful_weights.pt etc.
-    out_name = f"{args.probe}_{'MOCK' if args.mock else args.model.split('/')[-1]}"
+    pool_tag = "" if args.pool == "mean" else f"_{args.pool}pool"
+    out_name = f"{args.probe}_{'MOCK' if args.mock else args.model.split('/')[-1]}{pool_tag}"
     probe_path = PROBES_DIR / f"{out_name}_weights.pt"
     torch.save(weights_dict, probe_path)
     # Also save a probe PER scanned layer, so the experiments can sweep layers
@@ -230,8 +253,15 @@ def main() -> None:
     for L, (w, b) in per_layer.items():
         name = f"{out_name}_L{L}"
         torch.save({0: {"weight": w.numpy(), "bias": b.numpy()}}, PROBES_DIR / f"{name}_weights.pt")
+        # Per-layer probes need their OWN meta sidecar: LogisticProbe.load reads
+        # pooling from `<name>_probe_meta.json`, and without one a max-pooled
+        # per-layer probe would silently be read back as mean-pooled.
+        (PROBES_DIR / f"{name}_probe_meta.json").write_text(json.dumps(
+            {"model": model_id, "probe": args.probe, "layer": L, "hidden": hidden,
+             "pool": args.pool, "parent": out_name}, indent=2))
         layer_probe_names[L] = name
     meta = {"model": model_id, "probe": args.probe, "layer": L_best, "hidden": hidden,
+            "pool": args.pool,
             "test_auroc": te_best, "layer_scan": results,
             "probe_pool_per_class": len(acts_by_layer[L_best][0]),
             "reserved_for_experiments": args.reserve, "l2": args.l2,
@@ -244,7 +274,7 @@ def main() -> None:
     LogisticProbe.load(probe_path, device="cpu", dtype=torch.float32)
 
     print("\n" + "=" * 80)
-    print(f"TRAINED PROBE | model={model_id} | probe={args.probe}")
+    print(f"TRAINED PROBE | model={model_id} | probe={args.probe} | pool={args.pool}")
     print("=" * 80)
     for r in results:
         star = "  <- saved" if r["layer"] == L_best else ""

@@ -69,6 +69,31 @@ class _StopForward(Exception):
     pass
 
 
+def decoder_layers(model):
+    """The decoder's `nn.ModuleList` of blocks, wherever the architecture puts it.
+
+    `model.model.layers` holds for Llama/Gemma-2 causal-LM classes, but a
+    multimodal wrapper (Gemma-3 12b loads as Gemma3ForConditionalGeneration) nests
+    the text stack one level deeper. Probing the wrong attribute fails loudly here
+    rather than silently hooking nothing, so search the known spots in order.
+    """
+    import torch.nn as nn
+
+    candidates = [
+        getattr(getattr(model, "model", None), "layers", None),
+        getattr(getattr(getattr(model, "model", None), "language_model", None), "layers", None),
+        getattr(getattr(model, "language_model", None), "layers", None),
+        getattr(getattr(getattr(model, "model", None), "text_model", None), "layers", None),
+        getattr(model, "layers", None),
+    ]
+    for c in candidates:
+        if isinstance(c, nn.ModuleList) and len(c) > 0:
+            return c
+    raise RuntimeError(
+        f"could not locate the decoder layer list on {type(model).__name__}; "
+        "add its path to decoder_layers() before running this model.")
+
+
 def make_real_layer12(model, layer: int = TARGET_LAYER) -> Callable[[torch.Tensor], torch.Tensor]:
     """Return f(inputs_embeds) -> layer-`layer` residual, differentiable.
 
@@ -77,7 +102,7 @@ def make_real_layer12(model, layer: int = TARGET_LAYER) -> Callable[[torch.Tenso
     saving compute+memory per step, and the captured tensor keeps its autograd
     graph back to the soft prefix. (Name kept for import compatibility.)
     """
-    layers = model.model.layers
+    layers = decoder_layers(model)
 
     def f(inputs_embeds: torch.Tensor, attention_mask: torch.Tensor = None) -> torch.Tensor:
         captured = {}

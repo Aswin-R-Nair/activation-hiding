@@ -264,6 +264,16 @@ def main() -> None:
             log.info("step %d/%d  pos_loss %.4f  neg_hinge %.4f",
                      step, args.steps, tot_pos, tot_neg)
 
+    # ---- free training memory before eval ---------------------------------
+    # Adam state + the last backward's fragmented cache stay resident and OOM the
+    # eval/discretise forward passes on a shard-0 GPU that device_map already packs.
+    prefix.grad = None
+    del opt
+    if not args.mock and torch.cuda.is_available():
+        import gc
+        gc.collect()
+        torch.cuda.empty_cache()
+
     # ---- evaluate the optimised SOFT prefix -------------------------------
     p = {"train_pos": eval_scores(forward_layer12, probe, prefix, pos_tr, model_dtype, device, supports_attn, args.micro_batch),
          "train_neg": eval_scores(forward_layer12, probe, prefix, neg_tr, model_dtype, device, supports_attn, args.micro_batch),
