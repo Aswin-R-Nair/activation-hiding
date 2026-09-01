@@ -104,32 +104,39 @@ if major < 8:
              "gemma-2 would be forced to fp16 and may corrupt the measured "
              "activations. Destroy this instance and pick Ampere+ (A40/A100/"
              "L40S/4090/3090).")
-# The check that actually bites on new silicon: a torch build can import fine,
-# report CUDA available, and still have NO kernels for this GPU -- it then falls
-# back to PTX JIT (slow, sometimes broken) or dies at the first real matmul.
-# Blackwell GB10 is sm_121; a wheel built only up to sm_90 will not do.
+# On new silicon a torch build can import fine, report CUDA available, and still
+# have no kernels for this GPU. The arch list ALONE cannot decide this: GB10 is
+# sm_121 and cu130 wheels ship sm_120 cubins with no compute_* PTX, yet CUDA 13
+# treats Blackwell 12.x as a family, so sm_120 code is expected to run on sm_121.
+# So: warn on a missing exact arch, but let an ACTUAL KERNEL LAUNCH be the arbiter.
 archs = torch.cuda.get_arch_list()
 print("compiled for", archs)
 want = f"sm_{major}{minor}"
+same_family = [a for a in archs
+               if a.startswith("sm_") and a[3:].isdigit() and int(a[3:]) // 10 == major]
+has_ptx = any(a.startswith("compute_") for a in archs)
 if want not in archs:
-    compat = [a for a in archs
-              if a.startswith("sm_") and a[3:].isdigit() and int(a[3:]) // 10 == major]
-    msg = (f"this torch has no {want} kernels (built for {archs}). "
-           f"{name} will fall back to PTX JIT at best and fail at the first matmul "
-           "at worst.")
-    if compat:
-        sys.exit(msg + f" Same-major arches present ({compat}) may JIT, but do NOT "
-                 "trust timings or trust it silently -- install a torch built for "
-                 f"{want}: re-run with TORCH_INDEX pointing at a newer CUDA wheel index.")
-    sys.exit(msg + " Install a torch built for this arch (newer cuXXX wheel index) "
-             "before running anything.")
-# A real kernel launch: import + cuda.is_available() both pass on a broken build.
+    print(f"NOTE: no exact {want} cubin. same-family={same_family} ptx={has_ptx}. "
+          "Relying on family compatibility / JIT -- the matmul below decides it.")
+
+# Big enough to dispatch a real cuBLAS kernel; a 64x64 toy can be served by paths
+# that would not catch a missing kernel image.
 try:
-    a = torch.randn(64, 64, device="cuda", dtype=torch.bfloat16)
-    _ = (a @ a).float().sum().item()
+    a = torch.randn(4096, 4096, device="cuda", dtype=torch.bfloat16)
+    val = float((a @ a).float().sum())
+    torch.cuda.synchronize()
 except Exception as e:
-    sys.exit(f"bf16 matmul on {name} failed: {type(e).__name__}: {e}")
-print("bf16 matmul OK.")
+    extra = ""
+    if want not in archs:
+        extra = (f"\nThis torch has no {want} kernels and "
+                 + ("no PTX to JIT from" if not has_ptx else "PTX that did not JIT")
+                 + ". Install a torch built for this arch (newer cuXXX index), or "
+                 "switch to NVIDIA's NGC PyTorch container for your platform.")
+    sys.exit(f"bf16 matmul on {name} failed: {type(e).__name__}: {e}{extra}")
+if val != val:  # NaN -> kernels ran but produced garbage
+    sys.exit(f"bf16 matmul on {name} returned NaN -- numerically broken build, "
+             "do not trust any activations measured on it.")
+print(f"bf16 matmul OK (checksum {val:.3e}).")
 PY
 
 # ---------------------------------------------------------------------------
