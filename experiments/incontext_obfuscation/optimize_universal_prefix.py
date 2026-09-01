@@ -337,9 +337,22 @@ def main() -> None:
     # any later analysis can be redone offline WITHOUT re-optimising (expensive on 70B).
     torch.save({"prefix": prefix.detach().cpu(), "disc_ids": disc_ids.cpu()},
                outdir / "prefix.pt")
-    # nearest tokens for interpretability (same projection the discrete eval uses)
+    # nearest tokens for interpretability (same projection the discrete eval uses).
+    # ALSO record the INIT decode: the prefix is initialised at random real tokens,
+    # so a final decode that "looks like gibberish" is uninformative on its own --
+    # it may simply be the init showing through, unmoved in nearest-token space.
+    # Only the tokens that CHANGED say anything about what the optimisation found.
     if not args.mock:
-        (outdir / "nearest_prefix.txt").write_text(tok.decode(disc_ids.tolist()))
+        init_txt = tok.decode(init_ids.tolist())
+        final_txt = tok.decode(disc_ids.tolist())
+        moved = int((disc_ids.cpu() != init_ids.cpu()).sum())
+        (outdir / "nearest_prefix.txt").write_text(final_txt)
+        (outdir / "init_prefix.txt").write_text(init_txt)
+        (outdir / "prefix_drift.json").write_text(json.dumps({
+            "init": init_txt, "final": final_txt,
+            "tokens_moved": moved, "k": int(args.k),
+            "frac_moved": moved / max(1, int(args.k))}, indent=2))
+        log.info("nearest-token drift from init: %d/%d tokens moved", moved, args.k)
 
     soft_pd = float(summary.iloc[0]["pos_drop"])
     disc_pd = float(summary_disc.iloc[0]["pos_drop"])

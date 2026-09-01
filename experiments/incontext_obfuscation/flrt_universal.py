@@ -365,6 +365,7 @@ def main() -> None:
         """Returns (best_ids, history_df). `mode` in {'flrt', 'random'}."""
         init = [torch.randint(0, vocab, (args.init_len,), generator=gen)
                 for _ in range(args.buffer_size)]
+        inits[mode] = init[0].clone()
         buf = AttackBuffer(init, torch.device("cpu"))
         best_ids, best_full = None, float("inf")
         hist = []
@@ -461,7 +462,7 @@ def main() -> None:
         return pd.DataFrame([row("TEST (held out)", "test_pos", "test_neg", True),
                              row("train", "train_pos", "train_neg", False)]), p
 
-    results, histories, prefixes = {}, [], {}
+    results, histories, prefixes, inits = {}, [], {}, {}
     modes = ["flrt"] + (["random"] if args.random_control else [])
     for mode in modes:
         ids, hist = run_search(pos_tr, neg_tr, neg_tr_base_t, args.steps, mode, "universal")
@@ -478,6 +479,14 @@ def main() -> None:
         text = tok.decode(ids.tolist()) if tok else str(ids.tolist())
         (outdir / f"prefix_{mode}.txt").write_text(text)
         torch.save({"ids": ids.cpu()}, outdir / f"prefix_{mode}.pt")
+        # The buffer starts at random real tokens, so record what the search
+        # actually changed. A gibberish-looking final prefix that barely moved
+        # from its init says nothing about what the optimisation found.
+        init0 = inits[mode]
+        if tok is not None:
+            (outdir / f"init_{mode}.txt").write_text(tok.decode(init0.tolist()))
+            log.info("[%s] init %r -> final %r", mode,
+                     tok.decode(init0.tolist()), text)
 
     # ---- per-input positive control ---------------------------------------
     per_input_rows = []

@@ -52,9 +52,15 @@ if has A; then
       --micro-batch "$MICRO_BATCH" --tag flrt9b_perinput
 
   # The claim: ONE prefix, held-out passages, selective.
-  run $PY flrt_universal.py --model "$BASE9B" --probe harmful --layer "$LAYER9B" \
-      --n "$N" --test-frac 0.35 --steps "$FLRT_STEPS" --lam 1.0 \
-      --random-control --micro-batch "$MICRO_BATCH" --tag flrt9b_universal
+  # Multiple seeds because a NEGATIVE from a single initialisation is weak: the
+  # buffer starts at random real tokens, and the smoke run showed the init
+  # surviving into the final prefix. If all seeds land in the same place the null
+  # is about the token manifold; if they scatter, it is about search variance.
+  for SEED in ${FLRT_SEEDS:-0 1 2}; do
+    run $PY flrt_universal.py --model "$BASE9B" --probe harmful --layer "$LAYER9B" \
+        --n "$N" --test-frac 0.35 --steps "$FLRT_STEPS" --lam 1.0 --seed "$SEED" \
+        --random-control --micro-batch "$MICRO_BATCH" --tag "flrt9b_universal_s${SEED}"
+  done
 
   # lam is the same knob that produced the §12e tradeoff; if FLRT has a sweet
   # spot the soft attack lacked, it will be here.
