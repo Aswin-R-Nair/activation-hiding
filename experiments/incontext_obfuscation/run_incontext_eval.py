@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import List, Optional, Sequence, Tuple
@@ -148,6 +149,22 @@ class HFBackend:
         from transformers import AutoModelForCausalLM, AutoTokenizer
 
         self.target_layer = target_layer
+
+        # On a unified-memory box (GB10/Grace-Blackwell) nvidia-smi reports
+        # memory.total as N/A, and accelerate's device_map="auto" plans a weight
+        # layout from per-device memory totals. If that planning misreads the
+        # unified pool it will offload to "CPU" that is the same physical memory,
+        # or refuse to place the model at all. Everything in these experiments
+        # fits on one device, so OBF_DEVICE_MAP=cuda:0 makes the placement
+        # explicit and skips the planner entirely.
+        device_map = os.environ.get("OBF_DEVICE_MAP", device_map)
+        if device_map not in ("auto", "balanced", "sequential"):
+            device_map = {"": device_map}
+        log.info("device_map=%r", device_map)
+        if torch.cuda.is_available():
+            free, total = torch.cuda.mem_get_info()
+            log.info("cuda:0 reports %.1f GiB free / %.1f GiB total",
+                     free / 1024 ** 3, total / 1024 ** 3)
 
         kwargs = dict(device_map=device_map, dtype=dtype, attn_implementation="eager")
         # On a model that nearly fills the GPUs (e.g. 70B on 2x80GB), device_map=
