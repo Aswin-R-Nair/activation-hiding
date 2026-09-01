@@ -3,7 +3,7 @@
 #
 # On any new box (vast.ai PyTorch template OR a bare nvidia/cuda:* image), run once:
 #
-#   curl -fsSL https://raw.githubusercontent.com/Aswin-R-Nair/neural-chameleons/incontext-obfuscation/experiments/incontext_obfuscation/setup_gpu.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/Aswin-R-Nair/activation-hiding/incontext-obfuscation/experiments/incontext_obfuscation/setup_gpu.sh | bash
 #
 # It clones the repo (if not already present), installs deps, verifies the GPU
 # is bf16-capable, and runs a CPU mock test to confirm the harness imports.
@@ -19,7 +19,7 @@
 
 set -euo pipefail
 
-REPO_URL="https://github.com/Aswin-R-Nair/neural-chameleons.git"
+REPO_URL="https://github.com/Aswin-R-Nair/activation-hiding.git"
 BRANCH="incontext-obfuscation"
 CLONE_DIR="/workspace/neural-chameleons"
 EXP_SUBDIR="experiments/incontext_obfuscation"
