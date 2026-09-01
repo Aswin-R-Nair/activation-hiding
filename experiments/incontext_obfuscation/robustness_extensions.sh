@@ -34,7 +34,11 @@ STOCK9B="${STOCK9B:-google/gemma-2-9b-it}"
 ORGANISM="${ORGANISM:-serteal/neural-chameleon-gemma_2_9b-layer_12}"
 NEW_MODEL="${NEW_MODEL:-google/gemma-3-12b-it}"
 NEW_LAYERS="${NEW_LAYERS:-10,16,22,28,34,40}"
-FLRT_STEPS="${FLRT_STEPS:-800}"
+# Bailey's run config uses 2000 steps (their dedicated FLRT config: 10000), with
+# k1=16 / k2=64 / buffer_size=10 -- NOT the OptimizerConfig dataclass defaults,
+# which they never run with. At 800x8 we were doing ~6.4k candidate evaluations
+# against their ~32k; a null bounded by search effort has to match theirs.
+FLRT_STEPS="${FLRT_STEPS:-2000}"
 # p_add (0.5) exceeds p_del (0.25), so the prefix grows ~0.25 tokens/step and a
 # low cap binds for most of the run. 128 matches the upper end of the soft-prefix
 # k-sweep in 13c, so the discrete attack gets the same capacity ceiling the

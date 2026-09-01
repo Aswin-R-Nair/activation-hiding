@@ -94,23 +94,29 @@ EmbPair = Tuple[torch.Tensor, torch.Tensor]
 
 
 class AttackBuffer:
-    """Holds `size` candidate token sequences with their losses.
+    """Holds `size` candidate token sequences.
 
     Modified-FLRT semantics: each step replaces the WORST entry with the step's
     best candidate, so the buffer is a diverse pool rather than a hill-climb.
+
+    IMPORTANT -- no stored losses. In Bailey's per-input setting every candidate
+    is scored against the same single input, so cached losses are comparable and
+    the buffer can carry them. Universalising breaks that: each step scores on a
+    fresh minibatch of training samples, so cached losses come from DIFFERENT
+    sample subsets and comparing them ranks minibatch luck, not prefix quality.
+    The incumbent then never gets displaced and the search stalls at its initial
+    length (observed: 10 -> 11 tokens over 800 steps, while p_add 0.5 > p_del
+    0.25 should have grown it).
+
+    So the buffer stores sequences only, and the caller re-scores every entry on
+    the CURRENT minibatch each step. All comparisons are then like-for-like.
     """
 
-    def __init__(self, init_ids: List[torch.Tensor], device):
+    def __init__(self, init_ids: List[torch.Tensor], device=None):
         self.ids = list(init_ids)
-        self.losses = torch.full((len(init_ids),), float("inf"), device=device)
 
-    def get_best(self) -> torch.Tensor:
-        return self.ids[int(self.losses.argmin())]
-
-    def replace_worst(self, ids: torch.Tensor, loss: float) -> None:
-        j = int(self.losses.argmax())
-        self.ids[j] = ids
-        self.losses[j] = loss
+    def __len__(self) -> int:
+        return len(self.ids)
 
 
 # ---------------------------------------------------------------------------
@@ -276,24 +282,26 @@ def main() -> None:
     ap.add_argument("--test-frac", type=float, default=0.35)
     ap.add_argument("--layer", type=int, default=TARGET_LAYER)
     ap.add_argument("--reserve-gib", type=float, default=0.0)
-    ap.add_argument("--steps", type=int, default=500)
+    ap.add_argument("--steps", type=int, default=2000)
     ap.add_argument("--lam", type=float, default=1.0,
                     help="Weight on the hinge that keeps NEG scores from falling.")
     ap.add_argument("--init-len", type=int, default=10,
                     help="Initial prefix length in tokens (Bailey default 10).")
     ap.add_argument("--min-len", type=int, default=4)
     ap.add_argument("--max-len", type=int, default=64)
-    ap.add_argument("--buffer-size", type=int, default=8,
-                    help="Bailey's dataclass default is 0, which their AttackBuffer "
-                         "asserts against, so their runs override it; the value they "
-                         "used is not recoverable from this repo.")
+    ap.add_argument("--buffer-size", type=int, default=10,
+                    help="Bailey run config 10. Their dataclass default is 0, which "
+                         "their own AttackBuffer asserts against -- the value only "
+                         "appears in configs/experiment/zc-hard-prompt.yaml.")
     ap.add_argument("--init-mode", default="punct", choices=["punct", "random"],
                     help="punct = Bailey's punctuation init (default). random = "
                          "uniform over vocab, matching optimize_universal_prefix.py; "
                          "use only to expose the gibberish-decode confound.")
-    ap.add_argument("--k1", type=int, default=8, help="Candidate positions per step.")
-    ap.add_argument("--k2", type=int, default=15,
-                    help="Tokens sampled per position (Bailey default 15).")
+    ap.add_argument("--k1", type=int, default=16,
+                    help="Candidate positions per step (Bailey run config 16; dataclass default 8).")
+    ap.add_argument("--k2", type=int, default=64,
+                    help="Tokens sampled per position (Bailey run config 64; "
+                         "dataclass default 15).")
     ap.add_argument("--p-add", type=float, default=0.5,
                     help="Bailey default 0.5 -- their search GROWS the prefix "
                          "roughly 2:1 over mutating it in place.")
@@ -308,6 +316,10 @@ def main() -> None:
                     help="Bailey's setting: optimise a separate prefix per positive "
                          "sample. Positive control -- expected to partially succeed.")
     ap.add_argument("--per-input-n", type=int, default=8)
+    ap.add_argument("--random-len", type=int, default=0,
+                    help="Fixed length for the random control. 0 (default) = match "
+                         "the FLRT incumbent's length each step, so the comparison "
+                         "isolates SEARCH quality rather than prefix capacity.")
     ap.add_argument("--random-control", action="store_true",
                     help="Also run a random-token search with the same candidate budget.")
     ap.add_argument("--mock", action="store_true")
@@ -415,12 +427,37 @@ def main() -> None:
         hist = []
 
         for step in range(steps):
+            # Minibatch FIRST: every score this step -- buffer entries and new
+            # candidates alike -- is computed on these same samples.
+            def pick(pool, m):
+                if not pool:
+                    return np.zeros(0, dtype=int)
+                return rng.choice(len(pool), size=min(m, len(pool)), replace=False)
+            pi, ni = pick(pos_pool, args.mb_pos), pick(neg_pool, args.mb_neg)
+            pb = [pos_pool[i] for i in pi]
+            nb = [neg_pool[i] for i in ni]
+            nbase = neg_base_pool[torch.tensor(ni, dtype=torch.long)]
+
+            def batch_loss(ids):
+                l, _, _ = universal_loss(forward_layer, probe, emb_of(ids), pb, nb,
+                                         nbase, args.lam, model_dtype, device,
+                                         supports_attn, args.micro_batch)
+                return l
+
+            buf_scores = [batch_loss(ids) for ids in buf.ids]
+            cur = buf.ids[int(np.argmin(buf_scores))]
+
             if mode == "random":
-                length = int(torch.randint(args.min_len, args.max_len + 1, (1,), generator=gen))
+                # Length-matched to the incumbent unless --random-len overrides.
+                # Sampling uniformly from [min_len, max_len] gave random ~66 tokens
+                # against FLRT's 10, so its bigger pos_drop measured PREFIX LENGTH,
+                # not search quality (its neg_drop rose in step -- generic
+                # perturbation, not obfuscation).
+                length = args.random_len if args.random_len > 0 else int(cur.numel())
+                length = max(args.min_len, min(args.max_len, length))
                 cands = [torch.randint(0, vocab, (length,), generator=gen)
                          for _ in range(max(1, args.k1))]
             else:
-                cur = buf.get_best()
                 r = float(torch.rand(1, generator=gen))
                 if r < args.p_add or cur.numel() < args.min_len + 1:
                     op = "add"
@@ -440,29 +477,24 @@ def main() -> None:
             if not cands:
                 continue
 
-            # universal loss on a fresh minibatch each step
-            def pick(pool, m):
-                if not pool:
-                    return np.zeros(0, dtype=int)
-                return rng.choice(len(pool), size=min(m, len(pool)), replace=False)
-            pi, ni = pick(pos_pool, args.mb_pos), pick(neg_pool, args.mb_neg)
-            pb = [pos_pool[i] for i in pi]
-            nb = [neg_pool[i] for i in ni]
-            nbase = neg_base_pool[torch.tensor(ni, dtype=torch.long)]
-
-            losses = []
-            for c in cands:
-                l, _, _ = universal_loss(forward_layer, probe, emb_of(c), pb, nb, nbase,
-                                         args.lam, model_dtype, device, supports_attn,
-                                         args.micro_batch)
-                losses.append(l)
+            losses = [batch_loss(c) for c in cands]
             j = int(np.argmin(losses))
-            buf.replace_worst(cands[j], losses[j])
+            # Same-batch acceptance: displace the worst buffer entry only if the
+            # step's best candidate actually beats it ON THIS MINIBATCH.
+            w = int(np.argmax(buf_scores))
+            if losses[j] < buf_scores[w]:
+                buf.ids[w] = cands[j]
 
             # periodic honest score on the FULL train pool -- the minibatch loss is
             # noisy, so "best" must be decided on something that is not.
             if step % args.eval_every == 0 or step == steps - 1:
-                cur_best = buf.get_best()
+                # Decide the incumbent on the FULL train set, not a minibatch.
+                full_scores = [universal_loss(forward_layer, probe, emb_of(ids),
+                                              pos_pool, neg_pool, neg_base_pool,
+                                              args.lam, model_dtype, device,
+                                              supports_attn, args.micro_batch)[0]
+                               for ids in buf.ids]
+                cur_best = buf.ids[int(np.argmin(full_scores))]
                 full, pos_term, hinge = universal_loss(
                     forward_layer, probe, emb_of(cur_best), pos_pool, neg_pool,
                     neg_base_pool, args.lam, model_dtype, device, supports_attn,
@@ -477,7 +509,7 @@ def main() -> None:
                          "  best %.4f", label, mode, step, steps, cur_best.numel(),
                          full, pos_term, hinge, best_full)
         if best_ids is None:
-            best_ids = buf.get_best()
+            best_ids = buf.ids[0]
         return best_ids, pd.DataFrame(hist)
 
     tag = args.tag or ("mock" if args.mock else args.model.split("/")[-1])
@@ -509,6 +541,16 @@ def main() -> None:
     results, histories, prefixes, inits = {}, [], {}, {}
     modes = ["flrt"] + (["random"] if args.random_control else [])
     for mode in modes:
+        # Length-match the control to what FLRT actually reached. Random search
+        # does not grow its own sequences, so matching it to its own incumbent
+        # would pin it at --init-len; matching to FLRT's FINAL length asks the
+        # question that matters -- at the same token budget, does directed search
+        # beat drawing at random? Prefix length alone perturbs the residual
+        # stream, so an unmatched comparison measures capacity, not search.
+        if mode == "random" and args.random_len == 0 and "flrt" in prefixes:
+            args.random_len = int(prefixes["flrt"].numel())
+            log.info("random control length-matched to FLRT's final %d tokens",
+                     args.random_len)
         ids, hist = run_search(pos_tr, neg_tr, neg_tr_base_t, args.steps, mode, "universal")
         histories.append(hist)
         summary, per_sample = summarise(emb_of(ids))
