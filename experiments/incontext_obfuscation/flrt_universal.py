@@ -185,6 +185,39 @@ def propose(
     return out
 
 
+PUNCT = [".", ",", "!", "?", ";", ":", "(", ")", "[", "]", "{", "}"]
+
+
+def init_ids(mode: str, n: int, length: int, vocab: int, tok, gen):
+    """Starting sequences for the buffer.
+
+    `punct` reproduces Bailey's `flrt_utils.gen_init_buffer_ids`: sample from
+    punctuation only, with replacement. This is a deliberate choice on their part
+    -- punctuation is low-perplexity and semantically neutral, so the LM-guided
+    proposals can build outward from a plausible point. (Their jailbreak setting
+    also appends a behaviour-forcing 'Begin your response with "Sure, here".'
+    suffix; we have no behaviour target, only the probe, so it is omitted.)
+
+    `random` samples uniformly over the whole vocabulary, which is what
+    `optimize_universal_prefix.py` does. It starts the search inside gibberish
+    space, so a final prefix that DECODES as gibberish tells you nothing -- keep
+    this mode only as the comparison that makes that confound visible.
+    """
+    if mode == "random" or tok is None:
+        return [torch.randint(0, vocab, (length,), generator=gen) for _ in range(n)]
+    pool = []
+    for ch in PUNCT:
+        got = tok(ch, add_special_tokens=False)["input_ids"]
+        if len(got) == 1:
+            pool.append(got[0])
+    if not pool:
+        log.warning("no single-token punctuation for this tokenizer; random init")
+        return [torch.randint(0, vocab, (length,), generator=gen) for _ in range(n)]
+    pool_t = torch.tensor(pool, dtype=torch.long)
+    return [pool_t[torch.randint(0, len(pool), (length,), generator=gen)]
+            for _ in range(n)]
+
+
 def fixed_point_ids(ids: torch.Tensor, tok) -> torch.Tensor:
     """Iterate ids -> decode -> re-encode until stable (ported from FLRTOptimizer).
 
@@ -246,14 +279,26 @@ def main() -> None:
     ap.add_argument("--steps", type=int, default=500)
     ap.add_argument("--lam", type=float, default=1.0,
                     help="Weight on the hinge that keeps NEG scores from falling.")
-    ap.add_argument("--init-len", type=int, default=16, help="Initial prefix length in tokens.")
+    ap.add_argument("--init-len", type=int, default=10,
+                    help="Initial prefix length in tokens (Bailey default 10).")
     ap.add_argument("--min-len", type=int, default=4)
     ap.add_argument("--max-len", type=int, default=64)
-    ap.add_argument("--buffer-size", type=int, default=8)
+    ap.add_argument("--buffer-size", type=int, default=8,
+                    help="Bailey's dataclass default is 0, which their AttackBuffer "
+                         "asserts against, so their runs override it; the value they "
+                         "used is not recoverable from this repo.")
+    ap.add_argument("--init-mode", default="punct", choices=["punct", "random"],
+                    help="punct = Bailey's punctuation init (default). random = "
+                         "uniform over vocab, matching optimize_universal_prefix.py; "
+                         "use only to expose the gibberish-decode confound.")
     ap.add_argument("--k1", type=int, default=8, help="Candidate positions per step.")
-    ap.add_argument("--k2", type=int, default=32, help="Tokens sampled per position.")
-    ap.add_argument("--p-add", type=float, default=0.25)
-    ap.add_argument("--p-swap", type=float, default=0.5)
+    ap.add_argument("--k2", type=int, default=15,
+                    help="Tokens sampled per position (Bailey default 15).")
+    ap.add_argument("--p-add", type=float, default=0.5,
+                    help="Bailey default 0.5 -- their search GROWS the prefix "
+                         "roughly 2:1 over mutating it in place.")
+    ap.add_argument("--p-swap", type=float, default=0.25,
+                    help="Bailey default 0.25 (p_del is the remainder).")
     ap.add_argument("--mb-pos", type=int, default=4, help="Train positives scored per step.")
     ap.add_argument("--mb-neg", type=int, default=4, help="Train negatives scored per step.")
     ap.add_argument("--eval-every", type=int, default=25,
@@ -363,8 +408,7 @@ def main() -> None:
     # ---- the search --------------------------------------------------------
     def run_search(pos_pool, neg_pool, neg_base_pool, steps, mode: str, label: str):
         """Returns (best_ids, history_df). `mode` in {'flrt', 'random'}."""
-        init = [torch.randint(0, vocab, (args.init_len,), generator=gen)
-                for _ in range(args.buffer_size)]
+        init = init_ids(args.init_mode, args.buffer_size, args.init_len, vocab, tok, gen)
         inits[mode] = init[0].clone()
         buf = AttackBuffer(init, torch.device("cpu"))
         best_ids, best_full = None, float("inf")
