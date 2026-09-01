@@ -35,6 +35,11 @@ ORGANISM="${ORGANISM:-serteal/neural-chameleon-gemma_2_9b-layer_12}"
 NEW_MODEL="${NEW_MODEL:-google/gemma-3-12b-it}"
 NEW_LAYERS="${NEW_LAYERS:-10,16,22,28,34,40}"
 FLRT_STEPS="${FLRT_STEPS:-800}"
+# p_add (0.5) exceeds p_del (0.25), so the prefix grows ~0.25 tokens/step and a
+# low cap binds for most of the run. 128 matches the upper end of the soft-prefix
+# k-sweep in 13c, so the discrete attack gets the same capacity ceiling the
+# continuous one had -- otherwise a null is confounded with a tighter budget.
+FLRT_MAX_LEN="${FLRT_MAX_LEN:-128}"
 MICRO_BATCH="${MICRO_BATCH:-8}"
 
 has() { [[ " $STAGES " == *" $1 "* ]]; }
@@ -49,7 +54,7 @@ if has A; then
   # nothing -- stop and fix before reading anything else in this file.
   run $PY flrt_universal.py --model "$BASE9B" --probe harmful --layer "$LAYER9B" \
       --n "$N" --steps "$FLRT_STEPS" --per-input --per-input-n 8 \
-      --micro-batch "$MICRO_BATCH" --tag flrt9b_perinput
+      --micro-batch "$MICRO_BATCH" --max-len "$FLRT_MAX_LEN" --tag flrt9b_perinput
 
   # The claim: ONE prefix, held-out passages, selective.
   # Multiple seeds because a NEGATIVE from a single initialisation is weak: the
@@ -59,7 +64,7 @@ if has A; then
   for SEED in ${FLRT_SEEDS:-0 1 2}; do
     run $PY flrt_universal.py --model "$BASE9B" --probe harmful --layer "$LAYER9B" \
         --n "$N" --test-frac 0.35 --steps "$FLRT_STEPS" --lam 1.0 --seed "$SEED" \
-        --random-control --micro-batch "$MICRO_BATCH" --tag "flrt9b_universal_s${SEED}"
+        --random-control --micro-batch "$MICRO_BATCH" --max-len "$FLRT_MAX_LEN" --tag "flrt9b_universal_s${SEED}"
   done
 
   # lam is the same knob that produced the §12e tradeoff; if FLRT has a sweet
@@ -67,7 +72,7 @@ if has A; then
   for LAM in 5 10; do
     run $PY flrt_universal.py --model "$BASE9B" --probe harmful --layer "$LAYER9B" \
         --n "$N" --test-frac 0.35 --steps "$FLRT_STEPS" --lam "$LAM" \
-        --micro-batch "$MICRO_BATCH" --tag "flrt9b_lam${LAM}"
+        --micro-batch "$MICRO_BATCH" --max-len "$FLRT_MAX_LEN" --tag "flrt9b_lam${LAM}"
   done
 fi
 
@@ -88,7 +93,7 @@ if has B; then
       --proj-norm --lam 5 --tag maxpool_univprefix
   run $PY flrt_universal.py --model "$BASE9B" --probe "$MAXPROBE" \
       --layer "$LAYER9B" --n "$N" --test-frac 0.35 --steps "$FLRT_STEPS" \
-      --random-control --micro-batch "$MICRO_BATCH" --tag maxpool_flrt
+      --random-control --micro-batch "$MICRO_BATCH" --max-len "$FLRT_MAX_LEN" --tag maxpool_flrt
 fi
 
 # ---------------------------------------------------------------------------
@@ -127,7 +132,7 @@ if has D; then
   done
   run $PY flrt_universal.py --model "$NEW_MODEL" --probe "$NEWPROBE" --layer "$L" \
       --n "$N" --test-frac 0.35 --steps "$FLRT_STEPS" --random-control \
-      --micro-batch "$MICRO_BATCH" --tag g3_flrt
+      --micro-batch "$MICRO_BATCH" --max-len "$FLRT_MAX_LEN" --tag g3_flrt
 fi
 
 # ---------------------------------------------------------------------------
