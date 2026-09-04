@@ -74,16 +74,32 @@ bold "== 2. torch / bf16 capability =="
 if ! python -c "import torch" >/dev/null 2>&1; then
     warn "torch is not installed (bare CUDA image?) -- installing a CUDA build"
     ARCH="$(uname -m)"
-    # Driver's max supported CUDA, e.g. "12.8" -> cu128. Blackwell needs >= 12.8.
-    DRV_CUDA="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader >/dev/null 2>&1 \
-        && nvidia-smi | sed -n 's/.*CUDA Version: *\([0-9]*\)\.\([0-9]*\).*/\1\2/p' | head -1)"
-    TORCH_INDEX="${TORCH_INDEX:-https://download.pytorch.org/whl/cu${DRV_CUDA:-128}}"
-    echo "arch=${ARCH}  driver CUDA=${DRV_CUDA:-unknown}  index=${TORCH_INDEX}"
+    # nvidia-smi reports the driver's MAX supported CUDA (e.g. 13.1). PyTorch only
+    # publishes indexes for specific versions -- there is no cu131 -- so asking for
+    # the driver string verbatim 404s and pip reports "no matching distribution".
+    # Take the newest PUBLISHED index that the driver can run.
+    DRV="$(nvidia-smi 2>/dev/null | sed -n 's/.*CUDA Version: *\([0-9]*\)\.\([0-9]*\).*/\1\2/p' | head -1)"
+    echo "arch=${ARCH}  driver CUDA=${DRV:-unknown}"
     "$PY" -m pip install --quiet --upgrade pip
-    "$PY" -m pip install --index-url "${TORCH_INDEX}" torch \
-        || die "torch install failed. Pick an index from https://pytorch.org/get-started/locally/ \
-and re-run with TORCH_INDEX=<url>. On aarch64 (GB10/Grace) confirm that index \
-publishes arm64 wheels -- not all of them do."
+    if [ -n "${TORCH_INDEX:-}" ]; then
+        CANDIDATES="$TORCH_INDEX"
+    else
+        CANDIDATES=""
+        for V in 130 128 126 124 121 118; do
+            if [ -z "$DRV" ] || [ "$V" -le "$DRV" ]; then
+                CANDIDATES="$CANDIDATES https://download.pytorch.org/whl/cu${V}"
+            fi
+        done
+    fi
+    INSTALLED=0
+    for IDX in $CANDIDATES; do
+        echo "trying ${IDX}"
+        if "$PY" -m pip install --index-url "$IDX" torch; then INSTALLED=1; break; fi
+        warn "no torch at ${IDX} -- trying the next older index"
+    done
+    [ "$INSTALLED" = 1 ] || die "no PyTorch index worked. Pick one from
+  https://pytorch.org/get-started/locally/ and re-run with TORCH_INDEX=<url>.
+  On aarch64 (GB10/Grace) confirm the index publishes arm64 wheels -- not all do."
 fi
 
 "$PY" - <<'PY' || die "torch/bf16 check failed -- see message above."
