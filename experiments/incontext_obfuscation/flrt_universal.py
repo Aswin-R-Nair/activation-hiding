@@ -58,6 +58,7 @@ Usage
 from __future__ import annotations
 
 import argparse
+import collections
 import json
 import logging
 from pathlib import Path
@@ -224,6 +225,9 @@ def init_ids(mode: str, n: int, length: int, vocab: int, tok, gen):
             for _ in range(n)]
 
 
+_FP_CACHE: dict = {}
+
+
 def fixed_point_ids(ids: torch.Tensor, tok) -> torch.Tensor:
     """Iterate ids -> decode -> re-encode until stable (ported from FLRTOptimizer).
 
@@ -231,12 +235,24 @@ def fixed_point_ids(ids: torch.Tensor, tok) -> torch.Tensor:
     emit -- the whole point of this experiment is emittability, so a candidate that
     fails to round-trip would silently smuggle in an unreachable prefix.
     """
+    key = tuple(ids.tolist())
+    hit = _FP_CACHE.get(key)
+    if hit is not None:
+        return hit.to(ids.device)
+    orig = key
     for _ in range(8):
         recoded = tok(tok.decode(ids.tolist()), return_tensors="pt",
                       add_special_tokens=False)["input_ids"][0].to(ids.device)
         if torch.equal(recoded, ids):
-            return ids
+            break
         ids = recoded
+    # Measured on GB10: k1 tokenizer round-trips per step on sequences growing to
+    # 120 tokens were ~1.8s/step of SAMPLE-INDEPENDENT cost -- 78% of per-input's
+    # step time. Candidates repeat heavily across steps (the buffer is mutated,
+    # not regenerated), so a cache on the id tuple removes almost all of it.
+    _FP_CACHE[orig] = ids.cpu()
+    if len(_FP_CACHE) > 200_000:
+        _FP_CACHE.clear()
     return ids
 
 
@@ -316,6 +332,13 @@ def main() -> None:
                     help="Bailey's setting: optimise a separate prefix per positive "
                          "sample. Positive control -- expected to partially succeed.")
     ap.add_argument("--per-input-n", type=int, default=8)
+    ap.add_argument("--explore", type=float, default=0.25,
+                    help="Probability of branching from a RANDOM buffer entry "
+                         "instead of the best. 0 reproduces Bailey exactly but "
+                         "collapses buffer diversity and stalls (see 14m).")
+    ap.add_argument("--buffer-every", type=int, default=1,
+                    help="Re-score the whole buffer on the current minibatch every "
+                         "N steps (1 = every step, most correct, most expensive).")
     ap.add_argument("--random-len", type=int, default=0,
                     help="Fixed length for the random control. 0 (default) = match "
                          "the FLRT incumbent's length each step, so the comparison "
@@ -425,6 +448,8 @@ def main() -> None:
         buf = AttackBuffer(init, torch.device("cpu"))
         best_ids, best_full = None, float("inf")
         hist = []
+        buf_scores_cache: List[float] = []
+        stats = collections.Counter()
 
         for step in range(steps):
             # Minibatch FIRST: every score this step -- buffer entries and new
@@ -444,8 +469,24 @@ def main() -> None:
                                          supports_attn, args.micro_batch)
                 return l
 
-            buf_scores = [batch_loss(ids) for ids in buf.ids]
-            cur = buf.ids[int(np.argmin(buf_scores))]
+            if step % args.buffer_every == 0 or not buf_scores_cache:
+                buf_scores = [batch_loss(ids) for ids in buf.ids]
+                buf_scores_cache = list(buf_scores)
+            else:
+                # Between refreshes, score only the incumbent on this batch so
+                # acceptance stays like-for-like; the rest of the buffer keeps
+                # its last-refresh score purely for choosing which slot to evict.
+                buf_scores = list(buf_scores_cache)
+            # Always branching from the argmin collapses buffer diversity: every
+            # entry becomes a mutation of one sequence, the eviction bar rises to
+            # meet the incumbent, and the search freezes (three of six 9B runs
+            # showed EXACTLY zero loss change over their last 500 steps). With
+            # probability --explore, branch from a random entry instead.
+            if float(torch.rand(1, generator=gen)) < args.explore:
+                cur = buf.ids[int(torch.randint(0, len(buf.ids), (1,), generator=gen))]
+                stats["explore_steps"] += 1
+            else:
+                cur = buf.ids[int(np.argmin(buf_scores))]
 
             if mode == "random":
                 # Length-matched to the incumbent unless --random-len overrides.
@@ -472,9 +513,25 @@ def main() -> None:
                 if not cands:
                     continue
             if tok is not None:
-                cands = [fixed_point_ids(c, tok) for c in cands]
+                fixed = [fixed_point_ids(c, tok) for c in cands]
+                # Retokenisation can UNDO the op. A punctuation run decodes to a
+                # string whose re-encoding merges adjacent punctuation, so an
+                # "add" on a punctuation-heavy prefix comes back the same length
+                # or shorter. That is the signature seen in the stalled 9B runs
+                # (lam5 held at exactly 7 tokens for 2000 steps with p_add=0.5,
+                # keeping its punctuation skeleton, while every run that escaped
+                # to non-punctuation grew to 79-120). Drop candidates whose
+                # post-retokenisation length contradicts the op, and count them.
+                keep = []
+                for c0, c1 in zip(cands, fixed):
+                    if mode != "random" and op == "add" and c1.numel() <= c0.numel() - 1:
+                        stats["add_undone"] += 1
+                        continue
+                    keep.append(c1)
+                cands = keep
             cands = [c for c in cands if args.min_len <= c.numel() <= args.max_len]
             if not cands:
+                stats["empty_step"] += 1
                 continue
 
             losses = [batch_loss(c) for c in cands]
@@ -510,6 +567,7 @@ def main() -> None:
                          full, pos_term, hinge, best_full)
         if best_ids is None:
             best_ids = buf.ids[0]
+        log.info("[%s/%s] search stats: %s", label, mode, dict(stats))
         return best_ids, pd.DataFrame(hist)
 
     tag = args.tag or ("mock" if args.mock else args.model.split("/")[-1])

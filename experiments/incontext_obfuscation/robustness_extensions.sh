@@ -73,7 +73,18 @@ if has A; then
 
   # lam is the same knob that produced the §12e tradeoff; if FLRT has a sweet
   # spot the soft attack lacked, it will be here.
-  for LAM in 5 10; do
+  #
+  # lam=0 is the important addition: no hinge is EXACTLY Bailey's objective --
+  # their ProbePredictLoss has no benign/negative constraint at all. It separates
+  # two very different nulls:
+  #   lam=0 suppresses but lam>0 does not -> suppression IS reachable on the token
+  #     manifold and SELECTIVITY is not. That is the §12e/§13b structural claim
+  #     demonstrated discretely -- a real result, not a null.
+  #   lam=0 also fails -> no token prefix moves this probe, and our hinge was
+  #     never the binding constraint.
+  # Without this arm, a null is confounded with us asking a strictly harder
+  # question than Bailey did.
+  for LAM in 0 5 10; do
     run $PY flrt_universal.py --model "$BASE9B" --probe harmful --layer "$LAYER9B" \
         --n "$N" --test-frac 0.35 --steps "$FLRT_STEPS" --lam "$LAM" \
         --micro-batch "$MICRO_BATCH" --max-len "$FLRT_MAX_LEN" --tag "flrt9b_lam${LAM}"
