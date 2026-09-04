@@ -343,6 +343,12 @@ def main() -> None:
                     help="Fixed length for the random control. 0 (default) = match "
                          "the FLRT incumbent's length each step, so the comparison "
                          "isolates SEARCH quality rather than prefix capacity.")
+    ap.add_argument("--modes", nargs="+", default=None, choices=["flrt", "random"],
+                    help="Explicit mode list, overriding --random-control. Use "
+                         "'--modes flrt' to skip the control on an exploratory run, "
+                         "then '--modes random --random-len L' afterwards with L set "
+                         "to the FLRT prefix length, so the control stays matched "
+                         "without re-running the search.")
     ap.add_argument("--random-control", action="store_true",
                     help="Also run a random-token search with the same candidate budget.")
     ap.add_argument("--mock", action="store_true")
@@ -604,7 +610,8 @@ def main() -> None:
                              row("train", "train_pos", "train_neg", False)]), p
 
     results, histories, prefixes, inits = {}, [], {}, {}
-    modes = ["flrt"] + (["random"] if args.random_control else [])
+    modes = args.modes if args.modes else (
+        ["flrt"] + (["random"] if args.random_control else []))
     for mode in modes:
         # Length-match the control to what FLRT actually reached. Random search
         # does not grow its own sequences, so matching it to its own incumbent
