@@ -444,6 +444,13 @@ def main() -> None:
     def run_search(pos_pool, neg_pool, neg_base_pool, steps, mode: str, label: str):
         """Returns (best_ids, history_df). `mode` in {'flrt', 'random'}."""
         init = init_ids(args.init_mode, args.buffer_size, args.init_len, vocab, tok, gen)
+        # The buffer's starting sequences must be retokenisation fixed points too:
+        # only candidates were forced before, so an unmodified init could be
+        # reported as a prefix the model cannot actually emit. Matters more at
+        # larger --init-len, where a long punctuation run merges heavily.
+        if tok is not None:
+            fp = [fixed_point_ids(c, tok) for c in init]
+            init = [c for c in fp if c.numel() >= args.min_len] or fp
         inits[mode] = init[0].clone()
         buf = AttackBuffer(init, torch.device("cpu"))
         best_ids, best_full = None, float("inf")
