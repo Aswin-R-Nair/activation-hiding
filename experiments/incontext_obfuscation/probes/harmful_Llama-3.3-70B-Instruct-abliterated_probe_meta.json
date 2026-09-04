@@ -1,0 +1,23 @@
+{
+  "model": "huihui-ai/Llama-3.3-70B-Instruct-abliterated",
+  "probe": "harmful",
+  "layer": 30,
+  "hidden": 8192,
+  "pool": "mean",
+  "test_auroc": 1.0,
+  "layer_scan": [
+    {
+      "layer": 30,
+      "train_auroc": 1.0,
+      "test_auroc": 1.0
+    }
+  ],
+  "probe_pool_per_class": 60,
+  "reserved_for_experiments": 40,
+  "l2": 0.001,
+  "content_based": true,
+  "experiment_disjoint": true,
+  "per_layer_probes": {
+    "30": "harmful_Llama-3.3-70B-Instruct-abliterated_L30"
+  }
+}

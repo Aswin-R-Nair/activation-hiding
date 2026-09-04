@@ -1,0 +1,8 @@
+{
+  "model": "huihui-ai/Llama-3.3-70B-Instruct-abliterated",
+  "probe": "harmful",
+  "layer": 30,
+  "hidden": 8192,
+  "pool": "mean",
+  "parent": "harmful_Llama-3.3-70B-Instruct-abliterated"
+}
